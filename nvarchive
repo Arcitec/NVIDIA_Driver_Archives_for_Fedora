@@ -876,15 +876,19 @@ function cmd_prune_ancient() {
     # since their GPU is already physically archived and EOL...
     # WARNING: Deletion is very dangerous if the user has incorrectly modified
     # the "NVIDIA_BACKUP_DIR" variable to some path that also houses other data.
+    CURRENT_PWD="${PWD}"
     if [[ "$1" == "check" ]]; then
         # Check what would be deleted, without actually deleting anything.
-        find "${NVIDIA_BACKUP_DIR}" -type f -mtime +240 -print
+        cd "${NVIDIA_BACKUP_DIR}" && find . -type f \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -mtime +240 -print
+        exit_if_error $? "Error: Failed to scan for old packages. Aborting..."
         echo "This was just a test-run. Nothing has been deleted..."
     else
         # Delete ancient files and empty folders.
-        find "${NVIDIA_BACKUP_DIR}" -type f -mtime +240 -print -delete
-        find "${NVIDIA_BACKUP_DIR}" -type d -empty -print -delete
-
+        cd "${NVIDIA_BACKUP_DIR}" && find . -type f \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -mtime +240 -print -delete && find . -type d \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -empty -print -delete
+        exit_if_error $? "Error: Failed to prune old packages. Aborting..."
+    fi
+    cd "${CURRENT_PWD}"
+    if [[ "$1" != "check" ]]; then
         # Update metadata cache with the timestamps for all remaining files.
         write_metadata
     fi
