@@ -249,8 +249,10 @@ function write_metadata() {
     # NOTE: We add `|| exit 1` to all lines, to make the metadata script exit
     # with an error code if any of the commands fail. The only reason why a stat
     # would fail is when the folder isn't writable. Missing files are a success.
+    # NOTE: We're specifically whitelisting the repository sub-folders, to avoid
+    # generating metadata for the RPM repo's dotfiles and git-directories, etc.
     CURRENT_PWD="${PWD}"
-    cd "${NVIDIA_BACKUP_DIR}" && find . -type f -not -name "metadata-cache" -print0 | sort -z | xargs -0 stat --printf='touch -mcd "@%Y" -- %N || exit 1\n' > "./metadata-cache"
+    cd "${NVIDIA_BACKUP_DIR}" && find . -type f \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -print0 | sort -z | xargs -0 stat --printf='touch -mcd "@%Y" -- %N || exit 1\n' > "./metadata-cache"
     if [[ $? -ne 0 ]]; then echo "Error while writing metadata cache. Aborting..."; exit 1; fi
     cd "${CURRENT_PWD}"
     if [[ $? -ne 0 ]]; then echo "Error while accessing previous working directory. Aborting..."; exit 1; fi
