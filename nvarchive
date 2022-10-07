@@ -1,0 +1,1044 @@
+#!/usr/bin/env bash
+
+# NVIDIA Driver Archives for Fedora.
+# Author: Bananaman
+# Release Version: October 7th, 2022.
+# Project Site: https://github.com/Bananaman/NVIDIA_Driver_Archives_for_Fedora
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# This code will only receive updates if necessary (maybe never).
+# The mirrored NVIDIA RPM archives are in a different repository,
+# which will be updated more frequently.
+
+
+# CONFIGURATION:
+
+# Feel free to move the RPM mirror directory somewhere else. By default,
+# it's in the folder "NVIDIA RPMs" relative to the script.
+# WARNING: Don't point this at any folder that contains other (non-mirror)
+# files, since many of our functions will modify/delete the folder contents!
+NVIDIA_BACKUP_DIR="$(dirname -- "$0")/NVIDIA RPMs"
+
+# Storage location for the currently active, local RPM repository.
+# NOTE: You don't need these files anymore after you've installed the RPMs.
+# WARNING: Don't point this at any folder that contains other (non-repo)
+# files, since we erase this entire directory tree when we setup the repo.
+LOCAL_REPO_BASE_DIR="$(dirname -- "$0")/Local Repo"
+
+# Filename for the local YUM (DNF) repo.
+YUM_REPO_FILE="/etc/yum.repos.d/local-nvidia-archive.repo"
+
+# Filename for the local "last updated at" file.
+LAST_UPDATE_FILE="${NVIDIA_BACKUP_DIR}/last-update"
+
+# Online archive repository. Only change if you know what you're doing
+# and you want to host your own repository somewhere.
+ONLINE_ARCHIVE_REPO_WEB="https://github.com/Bananaman/NVIDIA_Driver_Archives_for_Fedora_RPM_Storage"
+ONLINE_ARCHIVE_REPO_GIT="https://github.com/Bananaman/NVIDIA_Driver_Archives_for_Fedora_RPM_Storage.git"
+ONLINE_ARCHIVE_CHECK_UPDATE="https://raw.githubusercontent.com/Bananaman/NVIDIA_Driver_Archives_for_Fedora_RPM_Storage/main/last-update"
+
+
+# DON'T TOUCH ANYTHING BELOW THIS LINE.
+
+DEBUG="false"
+SCRIPT_INVOKED_PATH="$0"
+SCRIPT_NAME="$(basename -- "$0")"
+FEDORA_VERSION="$(rpm -E %fedora)"
+
+
+function exit_with_error() {
+    echo -e "$1"
+    exit 1
+}
+
+
+function exit_if_error() {
+    if [[ "$1" -ne 0 ]]; then
+        exit_with_error "$2"
+    fi
+}
+
+
+function display_formatted_date() {
+    # Display a date in ISO format with seconds-precision.
+    echo "${1} $(date -d "@${2}" --iso-8601=seconds)"
+}
+
+
+function check_online_date() {
+    # Check the online mirror's date.
+    # NOTE: We need "sed" to avoid control-sequences in the variable,
+    # and we need to check for zero-length results because any errors are
+    # swallowed by the sub-shell (especially for wget).
+    ONLINE_ARCHIVE_DATE="$(wget -q -O - -- "${ONLINE_ARCHIVE_CHECK_UPDATE}" | sed -E 's,[^0-9]+,,g')"
+    if [[ -z "${ONLINE_ARCHIVE_DATE}" ]]; then
+        echo "Warning: Unable to check for online updates at \"${ONLINE_ARCHIVE_REPO_WEB}\"."
+    else
+        display_formatted_date "Online Mirror:" "${ONLINE_ARCHIVE_DATE}"
+    fi
+}
+
+
+function check_local_date() {
+    # Fetch and display the local date (only if it exists).
+    LOCAL_ARCHIVE_DATE=""
+    if [[ -f "${LAST_UPDATE_FILE}" ]]; then
+        # NOTE: We need "sed" to avoid control-sequences in the variable.
+        LOCAL_ARCHIVE_DATE="$(<"${LAST_UPDATE_FILE}")"
+        LOCAL_ARCHIVE_DATE="$(echo "${LOCAL_ARCHIVE_DATE}" | sed -E 's,[^0-9]+,,g')"
+        if [[ -z "${LOCAL_ARCHIVE_DATE}" ]]; then
+            echo "Warning: Unable to read local mirror date from \"${LAST_UPDATE_FILE}\"."
+        else
+            # NOTE: Extra space to help align the two rows.
+            display_formatted_date " Local Mirror:" "${LOCAL_ARCHIVE_DATE}"
+        fi
+    fi
+}
+
+
+function check_mirror_dates() {
+    # Only checks the local date if the file exists.
+    check_local_date
+
+    # Always checks the online date.
+    check_online_date
+
+    # Compare the dates to help the user decide.
+    ONLINE_MIRROR_STATUS="newer"
+    if [[ ! -z "${ONLINE_ARCHIVE_DATE}" ]] && [[ ! -z "${LOCAL_ARCHIVE_DATE}" ]]; then
+        if [[ "${LOCAL_ARCHIVE_DATE}" == "${ONLINE_ARCHIVE_DATE}" ]]; then
+            echo -e "\nYour local mirror already matches the online mirror."
+            ONLINE_MIRROR_STATUS="identical"
+        elif [[ "${LOCAL_ARCHIVE_DATE}" -gt "${ONLINE_ARCHIVE_DATE}" ]]; then
+            echo -e "\nYour local mirror is newer than the online mirror."
+            ONLINE_MIRROR_STATUS="older"
+        else
+            # We know that the local isn't equal or greater, so local is older.
+            echo -e "\nYour local mirror is older than the online mirror."
+            ONLINE_MIRROR_STATUS="newer"
+        fi
+    fi
+}
+
+
+function erase_corrupt_mirror_and_exit() {
+    # Emergency cleanup of corrupt/incomplete driver archives. This is executed
+    # if the Git mirroring fails or if the user aborts the process manually.
+    echo "Error: Driver archive download failed or was canceled by user. Erasing the corrupt local mirror and aborting..."
+    rm -rf "${NVIDIA_BACKUP_DIR}"
+    exit_if_error $? "Error: Failed to remove local mirror at \"${NVIDIA_BACKUP_DIR}\". Please delete it manually."
+    exit 1
+}
+
+
+function fetch_driver_archives() {
+    # IMPORTANT: This intentionally does NOTHING if the user already has a local
+    # mirror, unless they also provide the "force" parameter.
+
+    # Fetching the online archives is a one-time automatic operation, after which
+    # the user is expected to either run their own "backup" command periodically
+    # to maintain their own local mirror, or to run the "reset-archives" command
+    # to delete their local mirror and fetch the latest online mirror archive.
+    # NOTE: This is mostly due to GitHub's LFS storage, which doesn't support
+    # removing old files without having to delete the entire repo, which also
+    # means that we can't do incremental downloads, sadly... And we need to use
+    # their LFS backend to be able to store the large RPM files at all.
+    if [[ ! -d "${NVIDIA_BACKUP_DIR}" ]] || [[ "${1}" == "force" ]]; then
+        DO_RESET=1
+        # Ask for confirmation if the local mirror folder already exists.
+        if [[ -d "${NVIDIA_BACKUP_DIR}" ]] && [[ "${1}" == "force" ]]; then
+            # Compare the local and online mirror's dates, show them to the
+            # user, and refuse to reset if their version is identical.
+            check_mirror_dates
+            if [[ "${ONLINE_MIRROR_STATUS}" == "identical" ]] || [[ "${ONLINE_MIRROR_STATUS}" == "older" ]]; then
+                echo "Aborting..."
+                exit 0
+            fi
+
+            echo -e "\nPlease consider using the \"backup\" command instead. That command is incremental, which is much faster than resetting everything and syncing the whole online archive again. The main reason why you might prefer to do this full reset via our GitHub archive is if you want to reduce the load on RPM Fusion's servers."
+            echo -e "\nYou can also manually check the contents of our online archive, to be sure that it contains what you want before you decide to do a reset:\n${ONLINE_ARCHIVE_REPO_WEB}\n"
+
+            while true; do
+                read -p "Are you sure that you want to erase your local archive and fetch the latest online archive? [y/n] " answer
+
+                case "${answer}" in
+                    [yY])
+                        DO_RESET=1
+                        break;
+                    ;;
+                    [nN])
+                        DO_RESET=0
+                        break;
+                    ;;
+                    *)
+                        # Invalid answer. Ask the question again.
+                    ;;
+                esac
+            done
+        else
+            # We know for a fact that the local mirror doesn't exist, so just
+            # display the online date for easy reference.
+            check_online_date
+
+            # Abort if we couldn't fetch the online date.
+            if [[ -z "${ONLINE_ARCHIVE_DATE}" ]]; then
+                exit_with_error "Error: Unable to retrieve online mirror information. Aborting..."
+            fi
+        fi
+
+        if [[ "${DO_RESET}" -eq 1 ]]; then
+            echo -e "\nFetching online NVIDIA driver archive. This is usually around 4-5 gigabytes of data. Please be patient...\n"
+            echo -e "You can see the RPM download progress via the \"Filtering content: x%\" progress line of the Git output below.\n"
+            echo -e "WARNING: If you abort this download, we will automatically erase the corrupt/incomplete local mirror and restart the same download the next time you run a command. So please, relax and be patient... <3\n"
+            echo -e "***\n"
+
+            # Erase any existing local archives.
+            if [[ -d "${NVIDIA_BACKUP_DIR}" ]]; then
+                rm -rf "${NVIDIA_BACKUP_DIR}"
+                exit_if_error $? "Error: Failed to remove local mirror at \"${NVIDIA_BACKUP_DIR}\"."
+            fi
+
+            # Trap script exits (i.e. Ctrl-C) while we're cloning the Git repository.
+            trap erase_corrupt_mirror_and_exit EXIT
+
+            # Clone the entire repository. This is done via Git-LFS, and takes
+            # a while since the repository is usually around 4-5 GB.
+            # NOTE: If the user doesn't have Git-LFS installed, then they won't
+            # actually be fetching any RPMs. That's their problem if they didn't
+            # read the fucking manual though. It's literally the first step both
+            # in README.md and in the built-in help output.
+            git clone --verbose -- "${ONLINE_ARCHIVE_REPO_GIT}" "${NVIDIA_BACKUP_DIR}"
+            if [[ $? -ne 0 ]]; then
+                trap - EXIT  # Remove trap to avoid dual triggers.
+                erase_corrupt_mirror_and_exit
+            fi
+
+            # Remove the exit-trap again, so that the user is free to cancel the rest.
+            trap - EXIT
+
+            # Apply existing metadata to ensure that we actually have proper timestamps
+            # when the user looks in the folder. Git doesn't preserve timestamps.
+            read_metadata
+
+            # Force a refresh of the Git status, otherwise we'll be extremely sluggish
+            # if we attempt to navigate into that folder and a Powerline plugin tries
+            # to fetch the Git status into the terminal prompt. Because our modified
+            # timestamps (from metadata above) will force Git-LFS to verify all local
+            # files again. It's best to force that refresh/verification now.
+            git -C "${NVIDIA_BACKUP_DIR}" status
+
+            echo -e "\nOnline driver archive successfully downloaded.\n\n***\n"
+        fi
+    fi
+}
+
+
+function write_metadata() {
+    # Writes a robust metadata file containing sorted, fully-escaped paths, with
+    # the full UNIX modification timestamp of each file. This information is
+    # necessary because `wget` relies on the time to avoid downloading existing
+    # files again, and we also rely on the time when pruning ancient archives.
+    # NOTE: We clobber the metadata cache and update it with all the latest results.
+    # NOTE: The `touch` command we're writing is given the parameters "m: only
+    # change modification time, c: don't create an empty file if target missing,
+    # d: set time to date (provided as UNIX timestamp via leading `@`)".
+    # NOTE: The reason why we're calling `stat` instead of using the built-in
+    # "printf" function of `find` is because we need filename escaping, which
+    # only `stat` supports. But our usage of `xargs` makes the external invocation
+    # of `stat` almost as fast as native `find`.
+    # NOTE: We add `|| exit 1` to all lines, to make the metadata script exit
+    # with an error code if any of the commands fail. The only reason why a stat
+    # would fail is when the folder isn't writable. Missing files are a success.
+    CURRENT_PWD="${PWD}"
+    cd "${NVIDIA_BACKUP_DIR}" && find . -type f -not -name "metadata-cache" -print0 | sort -z | xargs -0 stat --printf='touch -mcd "@%Y" -- %N || exit 1\n' > "./metadata-cache"
+    if [[ $? -ne 0 ]]; then echo "Error while writing metadata cache. Aborting..."; exit 1; fi
+    cd "${CURRENT_PWD}"
+    if [[ $? -ne 0 ]]; then echo "Error while accessing previous working directory. Aborting..."; exit 1; fi
+}
+
+
+function read_metadata() {
+    # Applying the metadata again is a simple matter of going into the target
+    # folder if it exists, and then executing the metadata file as a script.
+    if [[ ! -f "${NVIDIA_BACKUP_DIR}/metadata-cache" ]]; then return 0; fi
+    CURRENT_PWD="${PWD}"
+    cd "${NVIDIA_BACKUP_DIR}" && env bash -- "./metadata-cache"
+    if [[ $? -ne 0 ]]; then echo "Error while reading metadata cache. Aborting..."; exit 1; fi
+    cd "${CURRENT_PWD}"
+    if [[ $? -ne 0 ]]; then echo "Error while accessing previous working directory. Aborting..."; exit 1; fi
+}
+
+
+function set_pkg_parent_dir() {
+    # $1 = "INSTALL_NVIDIA_FROM_REPO"
+    if [[ "${1}" == "releases" ]]; then
+        PKG_PARENT_DIR="${NVIDIA_BACKUP_DIR}/${1}/${FEDORA_VERSION}/Everything/x86_64/os/Packages"
+    else
+        PKG_PARENT_DIR="${NVIDIA_BACKUP_DIR}/${1}/${FEDORA_VERSION}/x86_64"
+    fi
+}
+
+
+function list_available_akmods() {
+    # List drivers for user's current Fedora version, from all repos.
+    # NOTE: We output in a format that's compatible with both "restore-smart"
+    # and "restore-direct" (the latter doesn't need the fcXX number).
+    find "${NVIDIA_BACKUP_DIR}" -name "akmod-nvidia-*.rpm" | grep -E "/(releases|nvidia-driver|updates|updates/testing)/${FEDORA_VERSION}/.*?x86_64/" | sed -E 's,^.+?/(releases|nvidia-driver|updates|updates/testing)/[0-9]+/.*?x86_64.*?/a/akmod-nvidia-(.+?)\.(fc[0-9]+)\..*$,\1 \2 \3,g' | sed 's,updates/testing,updates-testing,g' | sort -u
+}
+
+
+function check_if_stupid() {
+    # Make sure that the user doesn't accidentally blow up their whole system.
+    if [[ -f /etc/dnf/dnf.conf ]] && grep -qE "(assumeyes|defaultyes)\\s*=" /etc/dnf/dnf.conf; then
+        exit_with_error "Error: You have stupid, dangerous options in your /etc/dnf/dnf.conf. Remove your stupid \"assumeyes\" or \"defaultyes\" values, since they can easily break your system by wiping everything automatically if there are serious package conflicts. You should always read each DNF question and answer via your brain. Aborting installation..."
+    fi
+}
+
+
+function cmd_install_deps() {
+    # Installs everything required by this script.
+    # - Git and Git-LFS are required for cloning the repository.
+    # - wget is used for mirroring data.
+    # - createrepo generates the local package repository.
+    # - python3 is used by various helper functions.
+    echo "Installing all required dependencies..."
+    sudo dnf --refresh install git git-lfs wget createrepo_c python3
+    exit_if_error $? "Error: Unable to install the required dependencies. This tool won't work properly on your machine."
+
+    # This project uses Git-LFS for large file storage (the RPM packages),
+    # so we must ensure that the user has enabled the plugin. It's harmless
+    # to run the "lfs install" command multiple times, since it just edits
+    # the user's "~/.gitconfig" to enable the LFS plugin.
+    echo -e "\nEnsuring that Git-LFS is enabled for your user account..."
+    git lfs install
+    exit_if_error $? "Error: Unable to configure Git-LFS on your user account. This tool won't work properly on your machine."
+}
+
+
+function cmd_list() {
+    fetch_driver_archives
+
+    echo "Listing packages compatible with your current Fedora version (${FEDORA_VERSION}):"
+    list_available_akmods
+}
+
+
+function cmd_list_tree() {
+    fetch_driver_archives
+
+    # List all local RPMs, except empty folders.
+    tree -a -P "*.rpm" --prune "${NVIDIA_BACKUP_DIR}"
+}
+
+
+function cmd_backup() {
+    # Ensure that they have the GitHub mirror as a starting point, to reduce
+    # the amount of load on RPM Fusion's servers, since the initial fetch
+    # is the largest by far. We don't want to hammer RPM Fusion.
+    fetch_driver_archives
+
+    # Determine which version to download.
+    DOWNLOAD_RELEASE="${1:-${FEDORA_VERSION}}"
+    if [[ ! "${DOWNLOAD_RELEASE}" =~ ^[0-9]+$ ]]; then
+        exit_with_error "Error: Release parameter must be a number."
+    fi
+
+    # Make a local mirror/backup of all NVIDIA drivers.
+    # NOTE: We only grab 64-bit versions, because other architectures (PowerPC
+    # and ARM, etc) don't matter for gaming. And there are no pure 32-bit repos.
+    # NOTE: We fetch all online repository packages, except the online repo
+    # metadata (the "repodata/repoview" junk folders). We keep debug packages
+    # too, since the debug RPMs only take around 2 megabytes per repo.
+    mkdir -p "${NVIDIA_BACKUP_DIR}"
+
+    # Apply existing metadata to ensure that we actually have proper timestamps
+    # when wget looks for changed files. Git doesn't preserve timestamps.
+    read_metadata
+
+    # NOTE: The reason why we directly use "download1.rpmfusion.org" instead
+    # of random mirrors, is because we NEED the "ground truth", rather than
+    # some mirror's sometimes-incorrect repositories. Sorry about that...
+    # We use wget with just 1 connection, to avoid overloading the server.
+
+    # Fedora Releases: Original driver that shipped at new Fedora release.
+    wget -P "${NVIDIA_BACKUP_DIR}" --mirror -nH -np --cut-dirs=2 --accept "*nvidia*" --regex-type posix --reject-regex '\/(repodata|repoview)\/' "https://download1.rpmfusion.org/nonfree/fedora/releases/${DOWNLOAD_RELEASE}/Everything/x86_64/os/Packages/"
+
+    # NVIDIA-Driver: The Fedora "3rd party drivers" repo for those who
+    # don't want the full RPM Fusion. Can be delayed compared to Updates.
+    wget -P "${NVIDIA_BACKUP_DIR}" --mirror -nH -np --cut-dirs=2 --accept "*nvidia*" --regex-type posix --reject-regex '\/(repodata|repoview)\/' "https://download1.rpmfusion.org/nonfree/fedora/nvidia-driver/${DOWNLOAD_RELEASE}/x86_64/"
+
+    # Updates: The latest released driver updates in RPM Fusion's repo.
+    wget -P "${NVIDIA_BACKUP_DIR}" --mirror -nH -np --cut-dirs=2 --accept "*nvidia*" --regex-type posix --reject-regex '\/(repodata|repoview)\/' "https://download1.rpmfusion.org/nonfree/fedora/updates/${DOWNLOAD_RELEASE}/x86_64/"
+
+    # Updates-Testing: The currently testing driver updates in RPM Fusion's repo (if any).
+    wget -P "${NVIDIA_BACKUP_DIR}" --mirror -nH -np --cut-dirs=2 --accept "*nvidia*" --regex-type posix --reject-regex '\/(repodata|repoview)\/' "https://download1.rpmfusion.org/nonfree/fedora/updates/testing/${DOWNLOAD_RELEASE}/x86_64/"
+
+    # Update metadata cache with the timestamps for all files.
+    write_metadata
+
+    # Places a UNIX timestamp date-tag in the mirror directory, which allows
+    # clients to detect whether the online archive is worth downloading or not,
+    # since they'll be able to easily see when their local archive is newer.
+    date "+%s" > "${LAST_UPDATE_FILE}"
+}
+
+
+function cmd_build_repo() {
+    fetch_driver_archives
+
+    # Clean our local repository and create directory structure containing
+    # every mirrored RPM Fusion repository, with sub-folders for the user's
+    # current Fedora release and CPU architecture, which guarantees that the
+    # repos won't be accessed by any other Fedora versions or architectures.
+    # NOTE: This matters if the user migrates the OS installation to another
+    # processor, or if they upgrade to a newer Fedora version.
+    # NOTE: The reason why we include EVERY repository is because that allows
+    # DNF to find the latest compatible CUDA package no matter where it is.
+    cmd_delete_repo
+    HAS_INSTALLED_REPO="false"
+    for REPO_SUB_DIR_ORIG in "releases" "nvidia-driver" "updates" "updates/testing"; do
+        # Generate a clean name for the final subdirectory in our own repo.
+        # NOTE: We basically replace subdirectory separators with dashes.
+        REPO_SUB_DIR_TARGET="$(echo "${REPO_SUB_DIR_ORIG}" | sed 's,/,-,g')"
+        echo -e "\nGenerating local \"${REPO_SUB_DIR_TARGET}\" repo from \"${REPO_SUB_DIR_ORIG}\":"
+
+        # Determine which parent directory contains the current repo mirror.
+        # Examples:
+        # - ./NVIDIA RPMs/nvidia-driver/36/x86_64
+        # - ./NVIDIA RPMs/updates/testing/36/x86_64
+        set_pkg_parent_dir "${REPO_SUB_DIR_ORIG}"
+
+        # Only process this repository if it has been mirrored.
+        if [[ -d "${PKG_PARENT_DIR}" ]]; then
+            # Create local subdirectory for the current repository.
+            LOCAL_REPO_DIR="${LOCAL_REPO_BASE_DIR}/${REPO_SUB_DIR_TARGET}/${FEDORA_VERSION}/x86_64"
+            mkdir -p "${LOCAL_REPO_DIR}"
+            exit_if_error $? "Error: Failed to create local repository directories at \"${LOCAL_REPO_DIR}\"."
+
+            # Find all top-level directories with single-character names, placing
+            # soft symlinks in our repo, with relative (-r) paths from link.
+            echo -e "\nLinking local repository packages..."
+            # Alternatively, canonicalize symlinks into absolute paths, which might
+            # be useful if user has widely separated their repo and RPM folders:
+            #find "${PKG_PARENT_DIR}" -mindepth 1 -maxdepth 1 -type d -name "?" -print0 | xargs -0 readlink -fz | xargs -0 -I '{}' -- ln -fsv -- '{}' "${LOCAL_REPO_DIR}/"
+            find "${PKG_PARENT_DIR}" -mindepth 1 -maxdepth 1 -type d -name "?" -print0 | xargs -0 -I '{}' -- ln -fsrv -- '{}' "${LOCAL_REPO_DIR}/"
+            exit_if_error $? "Error: Failed to create symbolic links to repository directories in \"${LOCAL_REPO_DIR}\"."
+
+            # Build the repository metadata, so that DNF can see the package list.
+            echo -e "\nBuilding local repository metadata..."
+            createrepo --database --pretty "${LOCAL_REPO_DIR}"
+            exit_if_error $? "Error: Failed to build local repository metadata in \"${LOCAL_REPO_DIR}\"."
+
+            # Generate the absolute "file://" URL to reach the repository's base.
+            # NOTE: The path must be URL-encoded, such as "%20" for spaces, and
+            # we use Python's standard library to guarantee optimal URL-encoding.
+            # NOTE: If any of the sub-shell commands fail, we catch that in "$?".
+            LOCAL_REPO_BASE_URL="file://$(readlink -f "${LOCAL_REPO_BASE_DIR}/${REPO_SUB_DIR_TARGET}" | python3 -c "import urllib.parse; print(urllib.parse.quote(input()))")/\$releasever/\$basearch/"
+            exit_if_error $? "Error: Failed to generate local repository URL for \"${LOCAL_REPO_DIR}\"."
+
+            # Write the local repository file so that DNF can find the packages.
+            # NOTE: Providing this repo gives us automatic dependency resolution.
+            # NOTE: We could set a custom "metadata_expire" to 1 second, so that
+            # the repo data is constantly refreshed. However, that leads to very
+            # annoying updates of this repo every time you use DNF. So instead,
+            # we'll use "--refresh" during our forced installation commands,
+            # to avoid that annoyance. It means that our script installs will
+            # refresh much slower, but at least we won't annoy the user during
+            # their regular computer usage later.
+            # NOTE: We disable "http_caching" to stop caching metadata and packages.
+            echo -e "\nAdding repository information to system..."
+            echo -e "[local-nvidia-archive:${REPO_SUB_DIR_TARGET}]\nname=Local NVIDIA Driver Archive (${REPO_SUB_DIR_TARGET}) for Fedora \$releasever - \$basearch\nbaseurl=${LOCAL_REPO_BASE_URL}\nenabled=1\ngpgcheck=0\nhttp_caching=none\n" | sudo tee -a "${YUM_REPO_FILE}"
+            exit_if_error $? "Error: Failed to write repository configuration to \"${YUM_REPO_FILE}\"."
+            HAS_INSTALLED_REPO="true"
+        else
+            echo "Info: Mirror data for \"${PKG_PARENT_DIR}\" doesn't exist. This is normal. Skipping \"${REPO_SUB_DIR_TARGET}\" repo..."
+        fi
+    done
+
+    # Verify that we have installed at least one repo definition.
+    if [[ "${HAS_INSTALLED_REPO}" == "false" ]]; then
+        exit_with_error "\nError: No repositories were added to your system. Please try again..."
+    fi
+}
+
+
+function cmd_show_repo() {
+    fetch_driver_archives
+
+    # List all contents of the local repo (including hidden files).
+    tree -a "${LOCAL_REPO_BASE_DIR}"
+}
+
+
+function cmd_delete_repo() {
+    # Removes the YUM repository definition and the local repo metadata.
+    # NOTE: DNF still remembers the name of the local repo that packages were
+    # installed from, even if you remove the repo and "dnf clean all",
+    # so `cmd_show_installed()` will still show "local-nvidia-archive...".
+    echo -e "Removing current local repository..."
+    if [[ -f "${YUM_REPO_FILE}" ]]; then
+        sudo rm -f "${YUM_REPO_FILE}"
+        exit_if_error $? "Error: Failed to remove local repository information at \"${YUM_REPO_FILE}\"."
+    fi
+    if [[ -d "${LOCAL_REPO_BASE_DIR}" ]]; then
+        rm -rf "${LOCAL_REPO_BASE_DIR}"
+        exit_if_error $? "Error: Failed to remove local repository at \"${LOCAL_REPO_BASE_DIR}\"."
+    fi
+    echo "Success."
+}
+
+
+function cmd_restore_menu() {
+    fetch_driver_archives
+
+    # Provide an automatic menu of available drivers.
+    # NOTE: "<<<" redirects a string to STDIN.
+    echo "Listing packages compatible with your current Fedora version (${FEDORA_VERSION}):"
+    mapfile -t ALL_RESTORE_PARAMS <<< "$(list_available_akmods)"
+    OLD_PS3="${PS3}"
+    PS3="?# Choose a number or press Enter to see list again: "
+    select RESTORE_PARAMS in "(or q) <Close Menu>" "${ALL_RESTORE_PARAMS[@]}"; do
+        if [[ "${RESTORE_PARAMS}" == "(or q) <Close Menu>" ]] || [[ "$REPLY" == "q" ]] || [[ "$REPLY" == "Q" ]]; then
+            echo "Closing menu..."
+            break
+        elif [[ ! -z "${RESTORE_PARAMS}" ]]; then
+            while true; do
+                read -p "Do you want to install \"${RESTORE_PARAMS}\"? [y/n] " answer
+
+                case "${answer}" in
+                    [yY])
+                        DO_INSTALL=1
+                        break;
+                    ;;
+                    [nN])
+                        DO_INSTALL=0
+                        break;
+                    ;;
+                    *)
+                        # Invalid answer. Ask the question again.
+                    ;;
+                esac
+            done
+
+            if [[ "${DO_INSTALL}" -eq 1 ]]; then
+                # Parse the three required parameters from the string.
+                # NOTE: The parameters are space-separated, so it's easy,
+                # and the "restore-smart"-command also validates them.
+                cmd_restore_smart "$(echo "${RESTORE_PARAMS}" | cut -d' ' -f1)" "$(echo "${RESTORE_PARAMS}" | cut -d' ' -f2)" "$(echo "${RESTORE_PARAMS}" | cut -d' ' -f3)"
+
+                # Break out of the main menu.
+                break
+            fi
+        else
+            echo "Not a valid number."
+        fi
+    done
+    PS3="${OLD_PS3}"
+}
+
+
+function cmd_restore_smart() {
+    fetch_driver_archives
+
+    # Verify the user's arguments.
+    # NOTE: Deeper validation will happen when we scan for packages later.
+    if [[ $# -ne 3 ]]; then
+        exit_with_error "Missing Arguments.\n\n\nRequired Parameters:\nrestore-smart <repo> <version> <fedorapkg>\n\n<repo>: One of \"releases\", \"nvidia-driver\", \"updates\" or \"updates-testing\", depending on where your desired version resides.\n\n<version>: The exact NVIDIA driver version you want to install. Check the installable versions with the \"list\" command to see the correct version numbers.\n\n<fedorapkg>: The Fedora package version, such as \"fc37\".\n\n\nCommand Example:\nrestore-smart nvidia-driver 515.65.01-1 fc36"
+    fi
+
+    if [[ ! "$1" =~ ^(releases|nvidia-driver|updates|updates-testing)$ ]]; then
+        exit_with_error "Error: <repo> must be one of \"releases\", \"nvidia-driver\", \"updates\" or \"updates-testing\"."
+    fi
+
+    if [[ ! "$2" =~ ^[0-9] ]]; then
+        exit_with_error "Error: Driver version must begin with a number."
+    fi
+
+    if [[ ! "$3" =~ ^fc[0-9]+$ ]]; then
+        exit_with_error "Error: Fedora package version must follow the pattern \"fcXX\", such as \"fc37\"."
+    fi
+
+    INSTALL_NVIDIA_FROM_REPO="$1"
+    INSTALL_NVIDIA_RAW_VERSION="$2"
+    INSTALL_NVIDIA_FEDORAPKG="$3"
+    if [[ "${INSTALL_NVIDIA_FROM_REPO}" == "updates-testing" ]]; then
+        INSTALL_NVIDIA_FROM_REPO="updates/testing"
+    fi
+
+    # Figure out which driver line (modern or legacy) and version they want.
+    # NOTE: We do this splitting due to the complicated naming pattern of
+    # the legacy version packages, which move the "370xx" around in the names,
+    # and also because the KMODSRC packages sometimes have a different revision
+    # than the main AKMOD package, so we need more granularity in matching.
+    INSTALL_NVIDIA_RAW_VERSION_SPLIT="$(echo "${INSTALL_NVIDIA_RAW_VERSION}" | sed -E 's,^([0-9]+xx)?-?([0-9.]+)-([0-9]+)$,\1 \2 \3,g')"
+    INSTALL_NVIDIA_DRIVER_LINE="$(echo "${INSTALL_NVIDIA_RAW_VERSION_SPLIT}" | cut -d' ' -f1)"
+    INSTALL_NVIDIA_DRIVER_VERSION="$(echo "${INSTALL_NVIDIA_RAW_VERSION_SPLIT}" | cut -d' ' -f2)"
+    INSTALL_NVIDIA_DRIVER_REVISION="$(echo "${INSTALL_NVIDIA_RAW_VERSION_SPLIT}" | cut -d' ' -f3)"
+    if [[ "${DEBUG}" == "true" ]]; then
+        echo -e "\ninput:${INSTALL_NVIDIA_RAW_VERSION}@"
+        echo "line:${INSTALL_NVIDIA_DRIVER_LINE}@"
+        echo "version:${INSTALL_NVIDIA_DRIVER_VERSION}@"
+        echo "revision:${INSTALL_NVIDIA_DRIVER_REVISION}@"
+    fi
+
+    # Calculate the versioned package names for the AKMOD, KMODSRC and CUDA.
+    # NOTE: This has been verified to generate the correct paths for all versions.
+    # NOTE: The KMODSRC is EXTREMELY important. If we don't specify the exact
+    # version that we want, then DNF will download the LATEST KMODSRC online
+    # and will therefore fail to build the kmod for the driver you've installed,
+    # most likely because RPM Fusion's AKMOD never specifies a KMODSRC version.
+    # NOTE: We CANNOT use "fc${FEDORA_VERSION}" to auto-determine the "fc"-suffix,
+    # because sometimes packages use an older number, such as "/37/...fc36".
+    # NOTE: When requesting an older version via DNF, we MUST provide the version
+    # number WITH its "fcXX" suffix as the package name, since "fcXX" is part of
+    # the version number. If we omit the "fcXX", the package won't be found.
+    # NOTE: Use `dnf --showduplicates list "akmod-nvidia*"` to list all versions
+    # of the main driver, `dnf --showduplicates list "xorg-x11-drv-nvidia-*cuda"`
+    # to list all versions of the CUDA library (naming pattern for old GPUs
+    # differs greatly from the modern version).
+    #
+    # Examples:
+    # - akmod-nvidia-515.65.01-1.fc36
+    # - akmod-nvidia-390xx-390.147-3.fc36
+    # - xorg-x11-drv-nvidia-kmodsrc-515.65.01-1.fc36
+    # - xorg-x11-drv-nvidia-390xx-kmodsrc-390.147-2.fc36
+    # - xorg-x11-drv-nvidia-cuda-515.65.01-1.fc36
+    # - xorg-x11-drv-nvidia-390xx-cuda-390.147-2.fc36
+    #
+    # NOTE: For very old driver lines, the CUDA package is sometimes named something
+    # else, most commonly another version number than the AKMOD. So instead of trying
+    # to force a specific CUDA version, we will fallback to the generic name for the
+    # CUDA package, which then means that DNF will find the latest version of CODA for
+    # that "driver line name", and will then complain about broken dependencies if the
+    # CUDA package it found was too new compared to the chosen AKMOD. DNF will then
+    # automatically downgrade the CUDA package choice to the newest version of CUDA
+    # that's still compatible with the AKMOD we're installing. The DNF output will look
+    # uglier than if we were specific about the exact CUDA version, but it's better to
+    # always get the "best CUDA version" for the AKMOD and to live with the small warning
+    # from DNF when it has to resolve that package manually.
+    # NOTE: To ensure that we always find the newest CUDA version compatible with that
+    # AKMOD, we will embed EVERY repo in the local package archive (since updates can
+    # be posted in the different repos) and we will ALWAYS use the generic CUDA package
+    # name and let DNF resolve the highest CUDA version it can find in the local repo,
+    # which is compatible with the chosen AKMOD. It seems like RPM Fusion nowadays always
+    # has a matching CUDA and AKMOD version number, but in the past they have not been
+    # in sync, and there may be other releases at any time, so it's best to let DNF solve it.
+    # AKMOD: Use exact version and revision.
+    AKMOD_PKG_NAME="akmod-nvidia-${INSTALL_NVIDIA_RAW_VERSION}.${INSTALL_NVIDIA_FEDORAPKG}"
+    # KMODSRC: Use exact same version as AKMOD, but the latest KMODSRC revision.
+    # NOTE: Basically, the KMODSRC package sometimes has a different "X.Y.Z-revision"
+    # suffix, so we must allow DNF to scan for the latest KMODSRC in our entire local repo.
+    # NOTE: We use DNF's package-spec "globbing" to automatically find the revision,
+    # and thankfully DNF is smart enough to pick the latest version if multiple revisions
+    # are found (easily verified via `dnf install "vim-common-[89]*"` only installing v9).
+    # NOTE: We clamp our globbing to force the revision to begin with a number, followed
+    # by zero or more of any other characters. This is the most precise globbing available.
+    # NOTE: Use the following command to view a list of all kmodsrc files in the mirror:
+    # `find . -iname "*kmodsrc*" -print0 | xargs -0 -I '{}' basename '{}' | sort`
+    if [[ -z "${INSTALL_NVIDIA_DRIVER_LINE}" ]]; then
+        # Modern line (with exact KMODSRC version).
+        KMODSRC_PKG_NAME="xorg-x11-drv-nvidia-kmodsrc-${INSTALL_NVIDIA_DRIVER_VERSION}-[0123456789]*.${INSTALL_NVIDIA_FEDORAPKG}"
+    else
+        # Legacy line (with exact KMODSRC version).
+        KMODSRC_PKG_NAME="xorg-x11-drv-nvidia-${INSTALL_NVIDIA_DRIVER_LINE}-kmodsrc-${INSTALL_NVIDIA_DRIVER_VERSION}-[0123456789]*.${INSTALL_NVIDIA_FEDORAPKG}"
+    fi
+    # CUDA: Use latest compatible version.
+    if [[ -z "${INSTALL_NVIDIA_DRIVER_LINE}" ]]; then
+        # Modern line (with exact CUDA version).
+        #CUDA_PKG_NAME="xorg-x11-drv-nvidia-cuda-${INSTALL_NVIDIA_DRIVER_VERSION}-[0123456789]*.${INSTALL_NVIDIA_FEDORAPKG}"
+        # Modern line ("let DNF find the highest compatible version").
+        CUDA_PKG_NAME="xorg-x11-drv-nvidia-cuda"
+    else
+        # Legacy line (with exact CUDA version).
+        #CUDA_PKG_NAME="xorg-x11-drv-nvidia-${INSTALL_NVIDIA_DRIVER_LINE}-cuda-${INSTALL_NVIDIA_DRIVER_VERSION}-[0123456789]*.${INSTALL_NVIDIA_FEDORAPKG}"
+        # Legacy line ("let DNF find the highest compatible version").
+        CUDA_PKG_NAME="xorg-x11-drv-nvidia-${INSTALL_NVIDIA_DRIVER_LINE}-cuda"
+    fi
+
+    # Determine which parent directory contains the chosen AKMOD.
+    set_pkg_parent_dir "${INSTALL_NVIDIA_FROM_REPO}"
+
+    # Check if the AKMOD with the desired version exists in the repo.
+    # NOTE: We don't check the KMODSRC since we only have a DNF pkgspec globbing
+    # pattern, and we also don't want to enforce a specific repo subfolder, since
+    # a newer KMODSRC could existin a different repo, such as "updates". But DNF
+    # automatically aborts everything if it can't find the package, so it's fine.
+    # NOTE: The quickest way to debug mismatches for all driver packages is to set
+    # the `DEBUG=true` flag in this script, and then run the following command:
+    # `./nvarchive list | grep -v "^Listing" | xargs -L 1 ./nvarchive restore-smart`
+    AKMOD_PKG_FILE="${PKG_PARENT_DIR}/${AKMOD_PKG_NAME:0:1}/${AKMOD_PKG_NAME}.x86_64.rpm"
+    if [[ ! -f "${AKMOD_PKG_FILE}" ]]; then
+        exit_with_error "Error: Invalid parameters. AKMOD package doesn't exist: \"${AKMOD_PKG_FILE}\"."
+    fi
+    # NOTE: The KMODSRC check is disabled, since DNF takes care of verifying it.
+    #KMODSRC_PKG_FILE="${PKG_PARENT_DIR}/${KMODSRC_PKG_NAME:0:1}/${KMODSRC_PKG_NAME}.x86_64.rpm"
+    #if [[ ! -f "${KMODSRC_PKG_FILE}" ]]; then
+    #    echo "Error: Invalid parameters. KMODSRC package doesn't exist: \"${KMODSRC_PKG_FILE}\"."
+    #fi
+    # NOTE: The CUDA check is disabled, to let DNF find the best match, as described.
+    #CUDA_PKG_FILE="${PKG_PARENT_DIR}/${CUDA_PKG_NAME:0:1}/${CUDA_PKG_NAME}.x86_64.rpm"
+    #if [[ ! -f "${CUDA_PKG_FILE}" ]]; then
+    #    echo "Error: Invalid parameters. CUDA package doesn't exist: \"${CUDA_PKG_FILE}\"."
+    #fi
+    if [[ "${DEBUG}" == "true" ]]; then
+        #echo -e "\nFound packages:\n- ${AKMOD_PKG_FILE}\n- ${KMODSRC_PKG_FILE}\n- ${CUDA_PKG_FILE}"
+        echo -e "\nFound main package:\n- ${AKMOD_PKG_FILE}"
+        echo -e "\nChosen DNF packages:\n- ${AKMOD_PKG_NAME}\n- ${KMODSRC_PKG_NAME}\n- ${CUDA_PKG_NAME}"
+        exit 0
+    fi
+
+    # Check if the user is stupid, so that we don't break their machine.
+    check_if_stupid
+
+    # Build updated repositories using our latest mirror contents.
+    cmd_build_repo
+
+    # Educate the user about the installation process for older drivers.
+    echo -e "\n\n============\n\nPLEASE READ:\n\nAttempting installation. Please read CAREFULLY, and answer NO to the installation if things seem like they would break your system... Check the version numbers of all components that will be installed. Only answer YES if everything seems correct! This installation method automatically resolves all dependencies, but you must still be sure that the results look correct before proceeding, since installing older drivers might lead to the removal of other software that depends on the newer drivers!"
+    echo -e "\nThe installation will begin by removing your existing drivers, otherwise you will often end up with a mix of different NVIDIA package versions on your system, whenever your existing packages are marked as being compatible with a newer driver too."
+    echo -e "\nNOTE: It's normal that \"opencl-filesystem\" will be removed as an unused dependency. It's also normal that \"kmod-nvidia\" will be removed as an unused dependency if you're replacing a previous driver, because that's a virtual package created locally after you install a driver, and its only purpose is to make your current driver's kernel module easy to uninstall again."
+    echo -e "\nIMPORTANT: If you're installing an older driver, you will see some messages about DNF skipping \"akmod-nvidia\" due to \"conflicts\", and that it's skipping the CUDA package due to \"broken dependencies\", but that is totally normal. It just means that DNF was unable to install the newest version of CUDA since you've chosen an older AKMOD version, and means that it had to choose an older CUDA version that's compatible with your chosen AKMOD (NVIDIA Driver) version. It's totally normal, and you should simply ignore those warnings! Your chosen NVIDIA driver and its newest, compatible CUDA version will be installed!"
+    echo -e "\nStarting installation in 6 seconds... Please scroll back and read this information before you continue!\n\n============\n"
+    sleep 6  # Give them time to read...
+
+    # Delete their existing drivers, to ensure a proper installation.
+    # NOTE: If we don't remove the existing drivers, they will often end up
+    # with a mixture of old and new packages for things such as CUDA and the
+    # settings GUI, since they may still be marked as compatible with the
+    # newer version of the driver (when a package is marked as "version X+").
+    cmd_uninstall_nvidia
+
+    # Verify that they have uninstalled the previous driver, since there's a risk
+    # that they answered "no", which would screw up the installation.
+    # NOTE: This command should run very quickly, since the uninstall command
+    # above took care of any repo metadata refreshes that had been scheduled.
+    sudo dnf info --installed akmod-nvidia &>/dev/null
+    if [[ $? -eq 0 ]]; then
+        exit_with_error "\nError: You must allow us to uninstall the previous driver, otherwise you will often end up with a mix of different NVIDIA package versions on your system. Please try again, and read the instructions carefully..."
+    fi
+
+    # Tell DNF to install the AKMOD, KMODSRC and CUDA packages. All other packages
+    # will automatically be installed via dependency resolution.
+    # NOTE: Packages might also match from online repos if they haven't yet been
+    # deleted online. It doesn't matter what source DNF installs the packages from,
+    # as long as the user receives that exact package version.
+    # NOTE: Our DNF options are very important: "Refresh" forces a refresh of all
+    # metadata so that we detect our latest local packages, "Allow Erasing" must
+    # be provided so that we'll be allowed to downgrade packages, and "No Best"
+    # is necessary for overriding the user's dnf.conf behavior if they've manually
+    # enabled the "best" flag (which means that DNF refuses to install old packages).
+    # NOTE: "No Best" actually prevents upgrading CUDA if the user already has an
+    # older version installed on their system which is still compatible with the
+    # new AKMOD they're installing. That's why we removed all existing drivers above.
+    # NOTE: We can't have the best of both worlds. With "Best" we'd be unable to
+    # install older driver versions, and with "No Best" we're unable to get the
+    # latest CUDA version if they still have a compatible version installed.
+    # NOTE: As mentioned earlier, we must specify the KMODSRC version, otherwise
+    # it will install it from the newest driver, which won't be able to compile.
+    echo -e "\n\nRefreshing repositories and installing your chosen NVIDIA driver..."
+    sudo dnf --refresh --allowerasing --nobest install "${AKMOD_PKG_NAME}" "${KMODSRC_PKG_NAME}" "${CUDA_PKG_NAME}"
+    exit_if_error $? "Error: Installation failed or was canceled by user."
+
+    # Warn about having to wait until the kernel module has been built.
+    echo -e "\n\n============\n\nWARNING: Do NOT restart your computer until the kernel module has been built.\n\nTYPE THE FOLLOWING COMMAND NOW TO SEE YOUR CURRENT STATUS:\n\"${SCRIPT_INVOKED_PATH}\" check-kmod\n\nIf it says \"Module nvidia not found\", it means that the kernel module is still being compiled. It can take up to 5 minutes on slow computers, and around a minute on modern computers.\n\nWhen the build process is complete, it will output a version number, which should match the driver that you just installed. Then you're safe to reboot your computer.\n\nIf the module hasn't been built after several minutes, there might be a conflict with your current kernel version. In that case, type \"sudo akmods --force\" to attempt a build manually, which should then tell you if there's any problem!"
+}
+
+
+function cmd_restore_direct() {
+    fetch_driver_archives
+
+    # Verify the user's arguments.
+    # NOTE: Deeper validation will happen when we scan for packages later.
+    if [[ $# -ne 2 ]]; then
+        exit_with_error "Missing Arguments.\n\n\nRequired Parameters:\nrestore-direct <repo> <version>\n\n<repo>: One of \"releases\", \"nvidia-driver\", \"updates\" or \"updates-testing\", depending on where your desired version resides.\n\n<version>: The exact NVIDIA driver version you want to install. Check the installable versions with the \"list\" command to see the correct version numbers.\n\n\nCommand Example:\nrestore-direct nvidia-driver 515.65.01-1"
+    fi
+
+    if [[ ! "$1" =~ ^(releases|nvidia-driver|updates|updates-testing)$ ]]; then
+        exit_with_error "Error: <repo> must be one of \"releases\", \"nvidia-driver\", \"updates\" or \"updates-testing\"."
+    fi
+
+    if [[ ! "$2" =~ ^[0-9] ]]; then
+        exit_with_error "Error: Driver version must begin with a number."
+    fi
+
+    INSTALL_NVIDIA_FROM_REPO="$1"
+    INSTALL_NVIDIA_RAW_VERSION="$2"
+    if [[ "${INSTALL_NVIDIA_FROM_REPO}" == "updates-testing" ]]; then
+        INSTALL_NVIDIA_FROM_REPO="updates/testing"
+    fi
+
+    # Determine which parent directory contains all sub-packages.
+    if [[ "${INSTALL_NVIDIA_FROM_REPO}" == "releases" ]]; then
+        PKG_PARENT_DIR="${NVIDIA_BACKUP_DIR}/${INSTALL_NVIDIA_FROM_REPO}/${FEDORA_VERSION}/Everything/x86_64/os/Packages"
+    else
+        PKG_PARENT_DIR="${NVIDIA_BACKUP_DIR}/${INSTALL_NVIDIA_FROM_REPO}/${FEDORA_VERSION}/x86_64"
+    fi
+
+    # Check for ancient driver requests. We don't support them, unfortunately.
+    if [[ "$2" =~ .*xx.* ]]; then
+        echo "Sorry: Direct installation mode isn't supported for legacy drivers (anything with \"xx\" in the version number), due to their complicated RPM filenames and their non-standard list of dependencies/requirements. Regular repo-based installation (via the \"restore\" command), or manual installation, is necessary for older GPUs. Try the \"restore\" command first. If that doesn't work, use \"sudo dnf install <list of .RPMs to install>\" to install them yourself, and be sure to add every required RPM to the same command-line to ensure that DNF recognizes their dependencies properly."
+        echo -e "\nPull requests are welcome if someone wants to add robust direct installation support for older drivers, but this project will only accept non-hacky solutions, and the dynamic naming patterns and dynamic dependency lists for old drivers isn't a trivial problem to solve in a shell script. I don't even have an old GPU to test with, even if I wanted to implement it. Very sorry for the inconvenience."
+        echo -e "\nThe RPM files that you should install manually all exist under the following path:"
+        exit_with_error "${PKG_PARENT_DIR}"
+    fi
+
+    # List of packages we'll install from each architecture.
+    # NOTE: Look this up via `dnf list "*nvidia*"` and see your installed packages.
+    REQUIRED_PACKAGES_64BIT=("akmod-nvidia" "nvidia-persistenced" "nvidia-settings" "xorg-x11-drv-nvidia" "xorg-x11-drv-nvidia-cuda" "xorg-x11-drv-nvidia-cuda-libs" "xorg-x11-drv-nvidia-kmodsrc" "xorg-x11-drv-nvidia-libs" "xorg-x11-drv-nvidia-power")
+    REQUIRED_PACKAGES_32BIT=("xorg-x11-drv-nvidia-cuda-libs" "xorg-x11-drv-nvidia-libs")
+
+    # Determine the full package file paths.
+    # NOTE: The 32-bit (i686) packages reside under the 64-bit folder.
+    echo "Verifying that all local packages exist..."
+    FULL_PACKAGE_LIST=()
+    MISSING_PACKAGES=0
+    for PKG_ARCH in 64 32; do
+        PKG_ARCH_NAME="x86_64"; [[ "${PKG_ARCH}" == "32" ]] && { PKG_ARCH_NAME="i686"; }
+        typeset -n REQS_ARR="REQUIRED_PACKAGES_${PKG_ARCH}BIT"
+        for ((i = 0; i < ${#REQS_ARR[@]}; i++)); do
+            # Determine the RPM package filename.
+            # NOTE: We CANNOT use "fc${FEDORA_VERSION}" for strictest RPM matching,
+            # because sometimes packages use an older number, such as "/37/...fc36".
+            # However, it's fine since we match the FEDORA_VERSION folder strictly,
+            # and we verify that we've only found 1 RPM matching the pattern.
+            PKG_PREFIX="${REQS_ARR[$i]}"
+            PKG_FILE=("${PKG_PARENT_DIR}/${PKG_PREFIX:0:1}/${PKG_PREFIX}-${INSTALL_NVIDIA_RAW_VERSION}.fc"*".${PKG_ARCH_NAME}.rpm")
+
+            if [[ "${#PKG_FILE[@]}" -ne 1 ]]; then
+                exit_with_error "Error: Too many matches for RPM filename pattern (found ${#PKG_FILE[@]} matches, expected 1): ${PKG_FILE[@]}"
+            fi
+
+            PKG_FILE="${PKG_FILE[0]}"
+
+            # Check if RPM package is a non-empty file.
+            if [[ -f "${PKG_FILE}" ]] && [[ -s "${PKG_FILE}" ]]; then
+                echo "* ${PKG_FILE}: OK"
+                FULL_PACKAGE_LIST+=("${PKG_FILE}")
+            else
+                echo "* ${PKG_FILE}: MISSING OR CORRUPT!"
+                ((MISSING_PACKAGES+=1))
+            fi
+        done
+    done
+
+    # Abort if any packages are missing.
+    if [[ "${MISSING_PACKAGES}" -ne 0 ]]; then
+        exit_with_error "Error: Missing packages. Aborting...\nHint: Try the \"list\" command to see all available versions."
+    fi
+
+    # Check if the user is stupid, so that we don't break their machine.
+    check_if_stupid
+
+    # Tell DNF to install these packages.
+    # NOTE: We must ask it to do all at once, since dependencies won't
+    # be found automatically when we're installing local files.
+    # NOTE: Spaces in paths are supported, thanks to quoted expansion.
+    echo -e "\nAttempting installation. Please read CAREFULLY, and answer NO to the installation if things seem like they would break your system... Check the version numbers of all components that will be installed. Only answer YES if everything seems correct! This manual installation method doesn't resolve the dependencies automatically, so you must be sure that the results look correct before proceeding!"
+    echo -e "\nNOTE: It's normal that \"kmod-nvidia\" will be removed as an unused dependency if you're replacing a previous driver, because that's a virtual package created locally after you install a driver, and its only purpose is to make your current driver's kernel module easy to uninstall again.\n"
+    sleep 3  # Give them time to read...
+    sudo dnf --allowerasing install "${FULL_PACKAGE_LIST[@]}"
+    exit_if_error $? "Error: Installation failed or was canceled by user."
+
+    # Warn about having to wait until the kernel module has been built.
+    echo -e "\n\n============================\n\nWARNING: Do NOT restart your computer until the kernel module has been built.\n\nTYPE THE FOLLOWING COMMAND NOW TO SEE YOUR CURRENT STATUS:\n\"${SCRIPT_INVOKED_PATH}\" check-kmod\n\nIf it says \"Module nvidia not found\", it means that the kernel module is still being compiled. It can take up to 5 minutes on slow computers, and around a minute on modern computers.\n\nWhen the build process is complete, it will output a version number, which should match the driver that you just installed. Then you're safe to reboot your computer.\n\nIf the module hasn't been built after several minutes, there might be a conflict with your current kernel version. In that case, type \"sudo akmods --force\" to attempt a build manually, which should then tell you if there's any problem!"
+}
+
+
+function cmd_base_packages() {
+    fetch_driver_archives
+
+    # Shows all the "base" package names in the local mirror.
+    # NOTE: Only useful when developing this installer.
+    find "${NVIDIA_BACKUP_DIR}" -name "*.rpm" -exec basename {} \; | sed -E 's,^([a-z0-9\-]+)-[0-9]+\..*$,\1,g' | sed -E 's,-[0-9]+xx.*,,g' | sort -u
+}
+
+
+function cmd_prune_ancient() {
+    fetch_driver_archives
+
+    # Apply existing metadata to ensure that we actually have proper timestamps
+    # when pruning old packages. Git doesn't preserve timestamps.
+    read_metadata
+
+    # Delete all files older than 240 days, and all empty folders.
+    # NOTE: Always do this before packaging updates for a Git repo, since it makes
+    # the downloads much easier for users, and most importantly it helps you stay
+    # within the allowed repo size limits for your online Git hosting.
+    # NOTE: Sometimes this may only partially delete a related collection of RPMs,
+    # if some files aren't outside the limit yet, but people are very unlikely
+    # to use any of those extremely outdated packages anyway, so it doesn't matter.
+    # NOTE: We sometimes end up deleting drivers for ancient cards that only receive
+    # one package at the launch of a new "Fedora release", and don't receive any
+    # more driver updates after that. However, that's fine, because they can just
+    # download the exact same drivers online and don't need this archive repo,
+    # since their GPU is already physically archived and EOL...
+    # WARNING: Deletion is very dangerous if the user has incorrectly modified
+    # the "NVIDIA_BACKUP_DIR" variable to some path that also houses other data.
+    if [[ "$1" == "check" ]]; then
+        # Check what would be deleted, without actually deleting anything.
+        find "${NVIDIA_BACKUP_DIR}" -type f -mtime +240 -print
+        echo "This was just a test-run. Nothing has been deleted..."
+    else
+        # Delete ancient files and empty folders.
+        find "${NVIDIA_BACKUP_DIR}" -type f -mtime +240 -print -delete
+        find "${NVIDIA_BACKUP_DIR}" -type d -empty -print -delete
+
+        # Update metadata cache with the timestamps for all remaining files.
+        write_metadata
+    fi
+}
+
+
+function cmd_show_installed() {
+    echo "Showing installed packages matching *nvidia*:"
+    dnf --color=always list --installed "*nvidia*" | grep -v '^Installed Packages$'
+    echo -e "\nIMPORTANT: If you see the \"nvidia-gpu-firmware\" package, please don't uninstall it. That's your GPU firmware updates, which are natively provided by Fedora and contain important bugfixes for the hardware itself."
+}
+
+
+function cmd_check_kmod() {
+    modinfo -F version nvidia
+}
+
+
+function cmd_uninstall_nvidia() {
+    # Check if the user is stupid, so that we don't break their machine.
+    check_if_stupid
+
+    # Removes all of the RPMFusion packages, and the "kmod" dynamic package
+    # which contains the akmod's locally compiled kernel module.
+    # NOTE: We skip native Fedora packages, such as "nvidia-gpu-firmware".
+    # NOTE: Technically, a lot of this would be removed via dependency solver,
+    # but we still remove everything explicitly just to be more thorough.
+    # NOTE: We don't do any strict error-checking, since DNF treats previously
+    # removed packages as an error if we attempt to remove them again.
+    echo "Uninstalling all NVIDIA packages from your system..."
+    sudo dnf rm akmod-nvidia\* kmod-nvidia\* nvidia-modprobe\* nvidia-persistenced\* nvidia-settings\* nvidia-vaapi-driver\* nvidia-xconfig\* xorg-x11-drv-nvidia\*
+}
+
+
+function cmd_reset_archives() {
+    # Attempt a forced wipe of local archives, but that will only be allowed
+    # if the user's own local archive is older than the online archive.
+    # NOTE: The intended usage is to use the "backup" command for incremental
+    # growth of the local mirror instead. Resetting is not recommended unless
+    # the user has a lot of bandwidth, since it shifts the load from a small,
+    # incremental download at RPM Fusion to a large download from GitHub instead.
+    fetch_driver_archives force
+}
+
+
+function cmd_help() {
+    echo -e "NVIDIA Driver Archives for Fedora.\n"
+    echo -e "\nAvailable Commands:\n"
+    echo -e "  - install-deps: Installs all dependencies that are required by this tool.\n"
+    echo -e "  - list: Show all installable driver versions and their repo names. Only lists packages for your current Fedora version. The output lines are usable as arguments for the \"restore-smart\" and \"restore-direct\" commands.\n"
+    echo -e "  - list-tree: Show all locally mirrored packages.\n"
+    echo -e "  - backup [fedora version]: Make incremental local backups of online packages. All of your previous backups are also kept. Automatically detects your current Fedora version if nothing provided. You should also run \"build-repo\" or \"restore\" afterwards, to be able to use the mirrored packages via DNF.\n"
+    echo -e "  - build-repo: Allows you to build the local driver archive repository without installing anything from it. Can be useful if you prefer to do the installation manually via DNF. Most people should use \"restore\" instead, which automates the entire process of building the repo and installing the packages correctly with just one command.\n"
+    echo -e "  - show-repo: Show all contents of your local repo. Doesn't display the actual packages, but allows you to see the metadata and directory structures.\n"
+    echo -e "  - delete-repo: Deletes the local repository and all references to it from your computer. This doesn't delete your actual mirrored data. It's useful if you don't want to see the local repo anymore after you've installed the desired drivers. There is no harm in removing the repo after installation, since you can simply re-add the repository if you realize that you want some extra, optional NVIDIA packages later.\n"
+    echo -e "  - restore: The easiest way for beginners to install archived drivers. It lets you choose from a list of all available drivers, and then runs the \"restore-smart\" command automatically.\n"
+    echo -e "  - restore-smart <repo> <version> <fedorapkg>: Install packages from backups. Run the command without arguments for more help. Only installs packages matching your current Fedora version. Creates a local package repository and uses DNF's dependency resolver to accurately install all required and optional packages.\n"
+    echo -e "  - restore-direct <repo> <version>: Alternative installation method, which directly installs the RPM files without any automatic dependency resolution. Not recommended, due to the risk of missing useful \"optional\" dependencies. Try \"restore\" first, which performs safe, automatic dependency resolution.\n"
+    echo -e "  - show-installed: Shows all currently installed NVIDIA packages on your machine.\n"
+    echo -e "  - check-kmod: Checks the version and existence of your NVIDIA kernel module.\n"
+    echo -e "  - uninstall-nvidia: Cleans your machine by uninstalling all NVIDIA driver packages, regardless of how they were originally installed.\n"
+    echo -e "  - reset-archives: (Advanced) Erases your local mirror and fetches the current GitHub backup of the NVIDIA drivers. This is only recommended if you want to reduce the amount of load on RPM Fusion's servers. It's recommended that you use the \"backup\" command instead, which performs incremental downloads and is much faster for you. However, if you have a fast internet connection, then you could use this command to avoid putting any load on RPM Fusion's servers. It will only erase your local mirror and download new data if the online archive is newer than yours, so it's always safe to run this command to check for updates.\n"
+    echo -e "\nQuick Start Guide:\n"
+    echo -e "  - IMPORTANT: If you've never used this tool before, you *must* run the \"install-deps\" command first, to ensure that you have all required dependencies before attempting to use *any* other commands. This tool won't work until you've installed and loaded the dependencies!\n"
+    echo -e "  - Begin by running the \"backup\" command to download all available NVIDIA drivers from the internet. It's recommended that you run this whenever there's a new driver release online, so that you have an archive of all previous NVIDIA drivers to easily revert your system in case of problems.\n"
+    echo -e "  - Next, run \"restore\" and use the easy menu to install the desired drivers. It shows all locally mirrored drivers that are compatible with your version of Fedora. Just be sure to pick a driver that's compatible with your graphics card and your current kernel. But if you make a mistake, you can always boot the system with the open-source Nouveau drivers instead, and then simply install a different NVIDIA driver via this menu.\n"
+    echo -e "  - Lastly, you may want to run \"delete-repo\" to remove the local archive repo from your system, if you don't want to see it in DNF anymore. This doesn't erase your mirrored drivers. It simply removes the local repo from your machine, which is totally harmless, and it can be instantly reconstructed again via the \"build-repo\" command.\n"
+    echo -e "  - Run \"show-installed\" if you are curious about your currently installed NVIDIA driver packages.\n"
+    echo -e "  - If you ever want to completely uninstall the NVIDIA drivers from your computer, simply run the \"uninstall-nvidia\" command.\n"
+    echo -e "  - The other commands are only useful in special circumstances.\n"
+    echo -e "\nUsage:\n"
+    echo -e "  ${SCRIPT_NAME} <command> [arguments]"
+}
+
+
+case "$1" in
+    install-deps)
+        cmd_install_deps
+    ;;
+    list)
+        cmd_list
+    ;;
+    list-tree)
+        cmd_list_tree
+    ;;
+    backup)
+        cmd_backup "$2"
+    ;;
+    build-repo)
+        cmd_build_repo
+    ;;
+    show-repo)
+        cmd_show_repo
+    ;;
+    delete-repo)
+        cmd_delete_repo
+    ;;
+    restore)
+        cmd_restore_menu
+    ;;
+    restore-smart)
+        cmd_restore_smart "$2" "$3" "$4"
+    ;;
+    restore-direct)
+        cmd_restore_direct "$2" "$3"
+    ;;
+    base-packages)
+        # Developer Command: Shows the names of all base packages in the mirror.
+        # NOTE: Mainly useful for implementing "restore-direct" updates in the future.
+        cmd_base_packages
+    ;;
+    prune-ancient)
+        # Developer Command: Erases very outdated junk.
+        # WARNING: Very dangerous if user has incorrectly modified "NVIDIA_BACKUP_DIR".
+        cmd_prune_ancient "$2"
+    ;;
+    show-installed)
+        cmd_show_installed
+    ;;
+    check-kmod)
+        cmd_check_kmod
+    ;;
+    uninstall-nvidia)
+        cmd_uninstall_nvidia
+    ;;
+    reset-archives)
+        # Advanced. Not recommended.
+        cmd_reset_archives
+    ;;
+    *)
+        cmd_help
+    ;;
+esac
+
+
+###
+# NOTE FOR MAINTAINERS:
+#
+# The proper way to update the Git repo is by running "backup" for all currently
+# supported Fedora versions, meaning the current release plus previous, and
+# possibly also the upcoming version of Fedora; in other words n-1, n and n+1.
+#
+# An easy way to update for all Fedora releases is to use a range, such as:
+# `for i in {35..37}; do ./nvarchive backup $i; done`
+#
+# The latest data will be downloaded from the RPM Fusion base repository, and
+# all new packages are placed alongside your existing local packages.
+#
+# After the backups are complete, run the secret "prune-ancient" command, which
+# deletes all extremely old packages and all empty folders. This is necessary
+# to keep the repository as light and clean as possible (for users and Git host).
+#
+# You should also periodically wipe the online Git repo and force-push a clean
+# version with new history, to avoid hitting your provider's hosting limits.
+#
+# Note that you can run "prune-ancient check" to safely see which files are old,
+# without deleting anything yet.
+###
+
