@@ -2,7 +2,7 @@
 
 ## What is this?
 
-This is a tool (NVArchive) and a driver version repository which helps you archive and install NVIDIA's drivers for Fedora, so that you always have a safe and easy way to reinstall working drivers.
+This is a tool (NVArchive) that helps you build and maintain an archive of NVIDIA's drivers for Fedora, so that you always have a safe and easy way to reinstall working drivers.
 
 It was created due to NVIDIA sometimes releasing terrible drivers that break your system. If you're lucky, they'll just give you terrible performance or broken games. But in the worst cases, their bugs are so severe that you may not even have any display output anymore. This tool was created after the author was greeted by a soft-bricked computer with a completely black screen, and had finally had enough of NVIDIA's shenanigans.
 

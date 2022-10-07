@@ -32,10 +32,25 @@ YUM_REPO_FILE="/etc/yum.repos.d/local-nvidia-archive.repo"
 LAST_UPDATE_FILE="${NVIDIA_BACKUP_DIR}/last-update"
 
 # Online archive repository. Only change if you know what you're doing
-# and you want to host your own repository somewhere.
-ONLINE_ARCHIVE_REPO_WEB="https://github.com/Bananaman/NVIDIA_Driver_Archives_for_Fedora_RPM_Storage"
-ONLINE_ARCHIVE_REPO_GIT="https://github.com/Bananaman/NVIDIA_Driver_Archives_for_Fedora_RPM_Storage.git"
-ONLINE_ARCHIVE_CHECK_UPDATE="https://raw.githubusercontent.com/Bananaman/NVIDIA_Driver_Archives_for_Fedora_RPM_Storage/main/last-update"
+# and you want to host your own repository somewhere. If these variables
+# are set, then NVArchive will download the given repository and use its
+# contents for commands such as "reset-archives", etc.
+# NOTE: You should use Git-LFS for your repository, to support the large
+# packages (RPMs).
+# NOTE: By default, no archive repository is provided, since there aren't
+# any free Git-LFS hosts that could handle the bandwidth needs, but users
+# can quickly build their own local repo via the "backup" command.
+# NOTE: If you want to host your own archives, simply make a repo with the
+# contents of your "NVIDIA_BACKUP_DIR", and point these variables at it.
+# - WEB: Human-readable website URL to the repo, for manual inspection.
+# - GIT: The "git clone" URL for your repo (usually ends in ".git").
+# - CHECK_UPDATE: A plaintext URL to the "last-update" file from the driver
+#   mirror repo, which allows this tool to check whether the online archive
+#   has newer data than your local mirror. This value must be set, and the
+#   provided URL must give plaintext responses!
+ONLINE_ARCHIVE_REPO_WEB=""
+ONLINE_ARCHIVE_REPO_GIT=""
+ONLINE_ARCHIVE_CHECK_UPDATE=""
 
 
 # DON'T TOUCH ANYTHING BELOW THIS LINE.
@@ -66,15 +81,19 @@ function display_formatted_date() {
 
 
 function check_online_date() {
-    # Check the online mirror's date.
-    # NOTE: We need "sed" to avoid control-sequences in the variable,
-    # and we need to check for zero-length results because any errors are
-    # swallowed by the sub-shell (especially for wget).
-    ONLINE_ARCHIVE_DATE="$(wget -q -O - -- "${ONLINE_ARCHIVE_CHECK_UPDATE}" | sed -E 's,[^0-9]+,,g')"
-    if [[ -z "${ONLINE_ARCHIVE_DATE}" ]]; then
-        echo "Warning: Unable to check for online updates at \"${ONLINE_ARCHIVE_REPO_WEB}\"."
-    else
-        display_formatted_date "Online Mirror:" "${ONLINE_ARCHIVE_DATE}"
+    # Check the online mirror's date, if a mirror has been configured.
+    ONLINE_ARCHIVE_DATE=""
+    if [[ ! -z "${ONLINE_ARCHIVE_CHECK_UPDATE}" ]]; then
+        # NOTE: We need "sed" to avoid control-sequences in the variable,
+        # and we need to check for zero-length results because any errors are
+        # swallowed by the sub-shell (especially for wget).
+        ONLINE_ARCHIVE_DATE="$(wget -q -O - -- "${ONLINE_ARCHIVE_CHECK_UPDATE}" | sed -E 's,[^0-9]+,,g')"
+        if [[ -z "${ONLINE_ARCHIVE_DATE}" ]]; then
+            echo "Warning: Unable to check for online updates at \"${ONLINE_ARCHIVE_REPO_WEB}\"."
+        else
+            # NOTE: Strategic leading space to make it line up with the local date.
+            display_formatted_date " Online Mirror:" "${ONLINE_ARCHIVE_DATE}"
+        fi
     fi
 }
 
@@ -89,8 +108,7 @@ function check_local_date() {
         if [[ -z "${LOCAL_ARCHIVE_DATE}" ]]; then
             echo "Warning: Unable to read local mirror date from \"${LAST_UPDATE_FILE}\"."
         else
-            # NOTE: Extra space to help align the two rows.
-            display_formatted_date " Local Mirror:" "${LOCAL_ARCHIVE_DATE}"
+            display_formatted_date "* Local Mirror:" "${LOCAL_ARCHIVE_DATE}"
         fi
     fi
 }
@@ -100,22 +118,26 @@ function check_mirror_dates() {
     # Only checks the local date if the file exists.
     check_local_date
 
-    # Always checks the online date.
+    # Only checks the online date if an online repo exists.
     check_online_date
 
     # Compare the dates to help the user decide.
-    ONLINE_MIRROR_STATUS="newer"
-    if [[ ! -z "${ONLINE_ARCHIVE_DATE}" ]] && [[ ! -z "${LOCAL_ARCHIVE_DATE}" ]]; then
-        if [[ "${LOCAL_ARCHIVE_DATE}" == "${ONLINE_ARCHIVE_DATE}" ]]; then
-            echo -e "\nYour local mirror already matches the online mirror."
-            ONLINE_MIRROR_STATUS="identical"
-        elif [[ "${LOCAL_ARCHIVE_DATE}" -gt "${ONLINE_ARCHIVE_DATE}" ]]; then
-            echo -e "\nYour local mirror is newer than the online mirror."
-            ONLINE_MIRROR_STATUS="older"
-        else
-            # We know that the local isn't equal or greater, so local is older.
-            echo -e "\nYour local mirror is older than the online mirror."
-            ONLINE_MIRROR_STATUS="newer"
+    ONLINE_ARCHIVE_STATUS="none"
+    if [[ ! -z "${ONLINE_ARCHIVE_DATE}" ]]; then
+        ONLINE_ARCHIVE_STATUS="newer"
+
+        if [[ ! -z "${LOCAL_ARCHIVE_DATE}" ]]; then
+            if [[ "${LOCAL_ARCHIVE_DATE}" == "${ONLINE_ARCHIVE_DATE}" ]]; then
+                echo -e "\nYour local mirror already matches the online mirror."
+                ONLINE_ARCHIVE_STATUS="identical"
+            elif [[ "${LOCAL_ARCHIVE_DATE}" -gt "${ONLINE_ARCHIVE_DATE}" ]]; then
+                echo -e "\nYour local mirror is newer than the online mirror."
+                ONLINE_ARCHIVE_STATUS="older"
+            else
+                # We know that the local isn't equal or greater, so local is older.
+                echo -e "\nYour local mirror is older than the online mirror."
+                ONLINE_ARCHIVE_STATUS="newer"
+            fi
         fi
     fi
 }
@@ -133,24 +155,39 @@ function erase_corrupt_mirror_and_exit() {
 
 function fetch_driver_archives() {
     # IMPORTANT: This intentionally does NOTHING if the user already has a local
-    # mirror, unless they also provide the "force" parameter.
+    # mirror folder, unless they also provide the "force" parameter.
 
     # Fetching the online archives is a one-time automatic operation, after which
     # the user is expected to either run their own "backup" command periodically
     # to maintain their own local mirror, or to run the "reset-archives" command
     # to delete their local mirror and fetch the latest online mirror archive.
-    # NOTE: This is mostly due to GitHub's LFS storage, which doesn't support
-    # removing old files without having to delete the entire repo, which also
-    # means that we can't do incremental downloads, sadly... And we need to use
-    # their LFS backend to be able to store the large RPM files at all.
+    # NOTE: If an online archive is hosted at GitHub's LFS storage, keep in mind
+    # that they don't support removing old files without having to delete the
+    # entire repo, which also means that we can't do incremental downloads,
+    # sadly... And you need to use their LFS backend to be able to store the large
+    # packages (RPM files) at all. Also keep in mind that GitHub charges a fee
+    # for hosting large Git-LFS repos, so that's only possible on paid plans.
     if [[ ! -d "${NVIDIA_BACKUP_DIR}" ]] || [[ "${1}" == "force" ]]; then
-        DO_RESET=1
+        # Determine whether an online repository has been configured.
+        # NOTE: All variables must be set.
+        if [[ -z "${ONLINE_ARCHIVE_CHECK_UPDATE}" ]] || [[ -z "${ONLINE_ARCHIVE_REPO_GIT}" ]] || [[ -z "${ONLINE_ARCHIVE_REPO_WEB}" ]]; then
+            if [[ "${1}" == "force" ]]; then
+                # No repo is available, but we've been told to force an online reset,
+                # so explain this feature to the user and direct them to "backup".
+                exit_with_error "Error: You have not configured any online archives. The online archiving feature is only intended for people who want to self-host larger driver archives online at their own Git-LFS repositories. Keep in mind that free hosting services such as GitHub severely limit their allowed Git-LFS storage for free users, which means that the online repo archival feature is mainly useful for things such as private intranet usage at your company. Most people should use the \"backup\" command instead, which will build your own local archives directly from the normal driver repositories."
+            fi
+
+            # No repo is available, so don't attempt to download anything.
+            return 0
+        fi
+
         # Ask for confirmation if the local mirror folder already exists.
+        DO_ONLINE_RESET=1
         if [[ -d "${NVIDIA_BACKUP_DIR}" ]] && [[ "${1}" == "force" ]]; then
             # Compare the local and online mirror's dates, show them to the
-            # user, and refuse to reset if their version is identical.
+            # user, and refuse to reset if their local version is newer.
             check_mirror_dates
-            if [[ "${ONLINE_MIRROR_STATUS}" == "identical" ]] || [[ "${ONLINE_MIRROR_STATUS}" == "older" ]]; then
+            if [[ "${ONLINE_ARCHIVE_STATUS}" == "none" ]] || [[ "${ONLINE_ARCHIVE_STATUS}" == "identical" ]] || [[ "${ONLINE_ARCHIVE_STATUS}" == "older" ]]; then
                 echo "Aborting..."
                 exit 0
             fi
@@ -163,11 +200,11 @@ function fetch_driver_archives() {
 
                 case "${answer}" in
                     [yY])
-                        DO_RESET=1
+                        DO_ONLINE_RESET=1
                         break;
                     ;;
                     [nN])
-                        DO_RESET=0
+                        DO_ONLINE_RESET=0
                         break;
                     ;;
                     *)
@@ -186,13 +223,17 @@ function fetch_driver_archives() {
             fi
         fi
 
-        if [[ "${DO_RESET}" -eq 1 ]]; then
+        if [[ "${DO_ONLINE_RESET}" -eq 1 ]]; then
             echo -e "\nFetching online NVIDIA driver archive. This is usually around 4-5 gigabytes of data. Please be patient...\n"
             echo -e "You can see the RPM download progress via the \"Filtering content: x%\" progress line of the Git output below.\n"
             echo -e "WARNING: If you abort this download, we will automatically erase the corrupt/incomplete local mirror and restart the same download the next time you run a command. So please, relax and be patient... <3\n"
             echo -e "***\n"
 
             # Erase any existing local archives.
+            # NOTE: This is mainly necessary because we can't merge Git-LFS repos
+            # unless we always keep the entire repo history forever, which would be
+            # prohibitively large after a while. Therefore, wiping the repo history
+            # periodically is the only sane way to store RPMs in a Git-LFS repo.
             if [[ -d "${NVIDIA_BACKUP_DIR}" ]]; then
                 rm -rf "${NVIDIA_BACKUP_DIR}"
                 exit_if_error $? "Error: Failed to remove local mirror at \"${NVIDIA_BACKUP_DIR}\"."
@@ -292,7 +333,7 @@ function list_available_akmods() {
 function check_if_stupid() {
     # Make sure that the user doesn't accidentally blow up their whole system.
     if [[ -f /etc/dnf/dnf.conf ]] && grep -qE "(assumeyes|defaultyes)\\s*=" /etc/dnf/dnf.conf; then
-        exit_with_error "Error: You have stupid, dangerous options in your /etc/dnf/dnf.conf. Remove your stupid \"assumeyes\" or \"defaultyes\" values, since they can easily break your system by wiping everything automatically if there are serious package conflicts. You should always read each DNF question and answer via your brain. Aborting installation..."
+        exit_with_error "Error: You have dangerous options in your /etc/dnf/dnf.conf. Remove your \"assumeyes\" or \"defaultyes\" values, since they can easily break your system by wiping everything automatically if there are serious package conflicts. You should always read each DNF question and answer via your brain. Aborting installation..."
     fi
 }
 
@@ -319,6 +360,7 @@ function cmd_install_deps() {
 
 function cmd_list() {
     fetch_driver_archives
+    check_local_date
 
     echo "Listing packages compatible with your current Fedora version (${FEDORA_VERSION}):"
     list_available_akmods
@@ -327,6 +369,7 @@ function cmd_list() {
 
 function cmd_list_tree() {
     fetch_driver_archives
+    check_local_date
 
     # List all local RPMs, except empty folders.
     tree -a -P "*.rpm" --prune "${NVIDIA_BACKUP_DIR}"
@@ -334,12 +377,13 @@ function cmd_list_tree() {
 
 
 function cmd_backup() {
-    # Ensure that they have the GitHub mirror as a starting point, to reduce
-    # the amount of load on RPM Fusion's servers, since the initial fetch
-    # is the largest by far. We don't want to hammer RPM Fusion.
+    # Ensure that they have the Git mirror as a starting point, if they've
+    # configured a custom Git driver archive. Does nothing unless the
+    # "ONLINE_ARCHIVE" variables have all been configured.
     fetch_driver_archives
+    check_local_date
 
-    # Determine which version to download.
+    # Determine which Fedora version to use for the driver downloads.
     DOWNLOAD_RELEASE="${1:-${FEDORA_VERSION}}"
     if [[ ! "${DOWNLOAD_RELEASE}" =~ ^[0-9]+$ ]]; then
         exit_with_error "Error: Release parameter must be a number."
@@ -355,12 +399,18 @@ function cmd_backup() {
 
     # Apply existing metadata to ensure that we actually have proper timestamps
     # when wget looks for changed files. Git doesn't preserve timestamps.
+    # NOTE: This mostly matters for the custom Git archive feature.
     read_metadata
 
     # NOTE: The reason why we directly use "download1.rpmfusion.org" instead
     # of random mirrors, is because we NEED the "ground truth", rather than
-    # some mirror's sometimes-incorrect repositories. Sorry about that...
-    # We use wget with just 1 connection, to avoid overloading the server.
+    # some mirror's sometimes-desynced repositories. Sorry about that...
+    # We use wget with just 1 connection, to avoid overloading the server,
+    # and we only download the drivers for the user's current Fedora version,
+    # which is usually only around 2 GB at its peak by the time a Fedora release
+    # reaches its end of life. We do incremental downloads to reduce transfers.
+    # IMPORTANT: If anyone has ideas for spreading the load while still having
+    # highly accurate package mirroring, please submit pull requests!
 
     # Fedora Releases: Original driver that shipped at new Fedora release.
     wget -P "${NVIDIA_BACKUP_DIR}" --mirror -nH -np --cut-dirs=2 --accept "*nvidia*" --regex-type posix --reject-regex '\/(repodata|repoview)\/' "https://download1.rpmfusion.org/nonfree/fedora/releases/${DOWNLOAD_RELEASE}/Everything/x86_64/os/Packages/"
@@ -375,18 +425,37 @@ function cmd_backup() {
     # Updates-Testing: The currently testing driver updates in RPM Fusion's repo (if any).
     wget -P "${NVIDIA_BACKUP_DIR}" --mirror -nH -np --cut-dirs=2 --accept "*nvidia*" --regex-type posix --reject-regex '\/(repodata|repoview)\/' "https://download1.rpmfusion.org/nonfree/fedora/updates/testing/${DOWNLOAD_RELEASE}/x86_64/"
 
+    # Silently prune empty folders, since wget creates every folder it traverses.
+    # NOTE: We ignore any errors, since pruning the folders isn't important.
+    CURRENT_PWD="${PWD}"
+    cd "${NVIDIA_BACKUP_DIR}" && find . -type d \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -empty -delete
+    cd "${CURRENT_PWD}"
+
     # Update metadata cache with the timestamps for all files.
     write_metadata
 
     # Places a UNIX timestamp date-tag in the mirror directory, which allows
-    # clients to detect whether the online archive is worth downloading or not,
-    # since they'll be able to easily see when their local archive is newer.
+    # us to check the date of our own local archives easily. It also allows
+    # clients to detect whether the Git archive (advanced online archival
+    # feature) is worth downloading or not, since they'll be able to easily
+    # see when their local archive is newer.
     date "+%s" > "${LAST_UPDATE_FILE}"
+}
+
+
+function cmd_show_date() {
+    # Allows the user to quickly see when they last mirrored the data.
+    if [[ -f "${LAST_UPDATE_FILE}" ]]; then
+        check_local_date
+    else
+        echo "You don't have any local mirror yet."
+    fi
 }
 
 
 function cmd_build_repo() {
     fetch_driver_archives
+    check_local_date
 
     # Clean our local repository and create directory structure containing
     # every mirrored RPM Fusion repository, with sub-folders for the user's
@@ -466,6 +535,7 @@ function cmd_build_repo() {
 
 function cmd_show_repo() {
     fetch_driver_archives
+    check_local_date
 
     # List all contents of the local repo (including hidden files).
     tree -a "${LOCAL_REPO_BASE_DIR}"
@@ -492,6 +562,7 @@ function cmd_delete_repo() {
 
 function cmd_restore_menu() {
     fetch_driver_archives
+    check_local_date
 
     # Provide an automatic menu of available drivers.
     # NOTE: "<<<" redirects a string to STDIN.
@@ -541,6 +612,7 @@ function cmd_restore_menu() {
 
 function cmd_restore_smart() {
     fetch_driver_archives
+    #check_local_date  # NOTE: No need, since "cmd_build_repo" outputs it.
 
     # Verify the user's arguments.
     # NOTE: Deeper validation will happen when we scan for packages later.
@@ -748,6 +820,7 @@ function cmd_restore_smart() {
 
 function cmd_restore_direct() {
     fetch_driver_archives
+    check_local_date
 
     # Verify the user's arguments.
     # NOTE: Deeper validation will happen when we scan for packages later.
@@ -848,50 +921,11 @@ function cmd_restore_direct() {
 
 function cmd_base_packages() {
     fetch_driver_archives
+    check_local_date
 
     # Shows all the "base" package names in the local mirror.
     # NOTE: Only useful when developing this installer.
     find "${NVIDIA_BACKUP_DIR}" -name "*.rpm" -exec basename {} \; | sed -E 's,^([a-z0-9\-]+)-[0-9]+\..*$,\1,g' | sed -E 's,-[0-9]+xx.*,,g' | sort -u
-}
-
-
-function cmd_prune_ancient() {
-    fetch_driver_archives
-
-    # Apply existing metadata to ensure that we actually have proper timestamps
-    # when pruning old packages. Git doesn't preserve timestamps.
-    read_metadata
-
-    # Delete all files older than 240 days, and all empty folders.
-    # NOTE: Always do this before packaging updates for a Git repo, since it makes
-    # the downloads much easier for users, and most importantly it helps you stay
-    # within the allowed repo size limits for your online Git hosting.
-    # NOTE: Sometimes this may only partially delete a related collection of RPMs,
-    # if some files aren't outside the limit yet, but people are very unlikely
-    # to use any of those extremely outdated packages anyway, so it doesn't matter.
-    # NOTE: We sometimes end up deleting drivers for ancient cards that only receive
-    # one package at the launch of a new "Fedora release", and don't receive any
-    # more driver updates after that. However, that's fine, because they can just
-    # download the exact same drivers online and don't need this archive repo,
-    # since their GPU is already physically archived and EOL...
-    # WARNING: Deletion is very dangerous if the user has incorrectly modified
-    # the "NVIDIA_BACKUP_DIR" variable to some path that also houses other data.
-    CURRENT_PWD="${PWD}"
-    if [[ "$1" == "check" ]]; then
-        # Check what would be deleted, without actually deleting anything.
-        cd "${NVIDIA_BACKUP_DIR}" && find . -type f \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -mtime +240 -print
-        exit_if_error $? "Error: Failed to scan for old packages. Aborting..."
-        echo "This was just a test-run. Nothing has been deleted..."
-    else
-        # Delete ancient files and empty folders.
-        cd "${NVIDIA_BACKUP_DIR}" && find . -type f \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -mtime +240 -print -delete && find . -type d \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -empty -print -delete
-        exit_if_error $? "Error: Failed to prune old packages. Aborting..."
-    fi
-    cd "${CURRENT_PWD}"
-    if [[ "$1" != "check" ]]; then
-        # Update metadata cache with the timestamps for all remaining files.
-        write_metadata
-    fi
 }
 
 
@@ -923,13 +957,59 @@ function cmd_uninstall_nvidia() {
 }
 
 
+function cmd_prune_ancient() {
+    fetch_driver_archives
+    check_local_date
+
+    # Apply existing metadata to ensure that we actually have proper timestamps
+    # when pruning old packages. Git doesn't preserve timestamps.
+    read_metadata
+
+    # Delete all files older than 240 days, and all empty folders.
+    # NOTE: Always do this before packaging updates for a Git repo, since it makes
+    # the downloads much easier for users, and most importantly it helps you stay
+    # within the allowed repo size limits for your online Git hosting.
+    # NOTE: Sometimes this may only partially delete a related collection of RPMs,
+    # if some files aren't outside the limit yet, but people are very unlikely
+    # to use any of those extremely outdated packages anyway, so it doesn't matter.
+    # NOTE: We sometimes end up deleting drivers for ancient cards that only receive
+    # one package at the launch of a new "Fedora release", and don't receive any
+    # more driver updates after that. However, that's fine, because they can just
+    # download the exact same drivers online and don't need this archive repo,
+    # since their GPU is already physically archived and EOL...
+    # WARNING: Deletion is very dangerous if the user has incorrectly modified
+    # the "NVIDIA_BACKUP_DIR" variable to some path that also houses other data.
+    CURRENT_PWD="${PWD}"
+    if [[ "$1" == "check" ]]; then
+        # Check what would be deleted, without actually deleting anything.
+        cd "${NVIDIA_BACKUP_DIR}" && find . -type f \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -mtime +240 -print
+        exit_if_error $? "Error: Failed to scan for old packages. Aborting..."
+        echo "This was just a test-run. Nothing has been deleted..."
+    else
+        # Delete ancient files and empty folders.
+        echo "Before:"
+        du -hs "${NVIDIA_BACKUP_DIR}"
+        cd "${NVIDIA_BACKUP_DIR}" && find . -type f \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -mtime +240 -print -delete && find . -type d \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -empty -print -delete
+        exit_if_error $? "Error: Failed to prune old packages. Aborting..."
+    fi
+    cd "${CURRENT_PWD}"
+    if [[ "$1" != "check" ]]; then
+        # Update metadata cache with the timestamps for all remaining files.
+        write_metadata
+
+        echo "After:"
+        du -hs "${NVIDIA_BACKUP_DIR}"
+    fi
+}
+
+
 function cmd_reset_archives() {
     # Attempt a forced wipe of local archives, but that will only be allowed
     # if the user's own local archive is older than the online archive.
     # NOTE: The intended usage is to use the "backup" command for incremental
     # growth of the local mirror instead. Resetting is not recommended unless
     # the user has a lot of bandwidth, since it shifts the load from a small,
-    # incremental download at RPM Fusion to a large download from GitHub instead.
+    # incremental download at RPM Fusion to a large download from Git instead.
     fetch_driver_archives force
 }
 
@@ -941,6 +1021,7 @@ function cmd_help() {
     echo -e "  - list: Show all installable driver versions and their repo names. Only lists packages for your current Fedora version. The output lines are usable as arguments for the \"restore-smart\" and \"restore-direct\" commands.\n"
     echo -e "  - list-tree: Show all locally mirrored packages.\n"
     echo -e "  - backup [fedora version]: Make incremental local backups of online packages. All of your previous backups are also kept. Automatically detects your current Fedora version if nothing provided. You should also run \"build-repo\" or \"restore\" afterwards, to be able to use the mirrored packages via DNF.\n"
+    echo -e "  - show-date: Displays the completion date of your last \"backup\" command. Useful for determining whether it's worth doing another backup.\n"
     echo -e "  - build-repo: Allows you to build the local driver archive repository without installing anything from it. Can be useful if you prefer to do the installation manually via DNF. Most people should use \"restore\" instead, which automates the entire process of building the repo and installing the packages correctly with just one command.\n"
     echo -e "  - show-repo: Show all contents of your local repo. Doesn't display the actual packages, but allows you to see the metadata and directory structures.\n"
     echo -e "  - delete-repo: Deletes the local repository and all references to it from your computer. This doesn't delete your actual mirrored data. It's useful if you don't want to see the local repo anymore after you've installed the desired drivers. There is no harm in removing the repo after installation, since you can simply re-add the repository if you realize that you want some extra, optional NVIDIA packages later.\n"
@@ -950,7 +1031,8 @@ function cmd_help() {
     echo -e "  - show-installed: Shows all currently installed NVIDIA packages on your machine.\n"
     echo -e "  - check-kmod: Checks the version and existence of your NVIDIA kernel module.\n"
     echo -e "  - uninstall-nvidia: Cleans your machine by uninstalling all NVIDIA driver packages, regardless of how they were originally installed.\n"
-    echo -e "  - reset-archives: (Advanced) Erases your local mirror and fetches the current GitHub backup of the NVIDIA drivers. This is only recommended if you want to reduce the amount of load on RPM Fusion's servers. It's recommended that you use the \"backup\" command instead, which performs incremental downloads and is much faster for you. However, if you have a fast internet connection, then you could use this command to avoid putting any load on RPM Fusion's servers. It will only erase your local mirror and download new data if the online archive is newer than yours, so it's always safe to run this command to check for updates.\n"
+    echo -e "  - prune-ancient [\"check\"]: Cleans up your local mirror by deleting all driver packages that are older than 240 days. Useful when your local backups have been growing for a while. You can add the optional \"check\" parameter to do a safe test-run which simply shows which files will be deleted, without actually removing anything.\n"
+    echo -e "  - reset-archives: (Advanced) Erases your entire local mirror and fetches the configured Git backup of the NVIDIA drivers. This is only intended for companies or people who want to self-host the driver archives on their intranet or online. It's recommended that most people use the \"backup\" command instead, which performs smaller, incremental downloads and is much faster for you. However, if you have a fast internet connection and enough storage space to host driver archives on your own server, then you could use this command to avoid putting any load on RPM Fusion's servers. It will only erase your local mirror and download new data if the online archive is newer than yours, so it's always safe to run this command to check for updates at your custom Git repository.\n"
     echo -e "\nQuick Start Guide:\n"
     echo -e "  - IMPORTANT: If you've never used this tool before, you *must* run the \"install-deps\" command first, to ensure that you have all required dependencies before attempting to use *any* other commands. This tool won't work until you've installed and loaded the dependencies!\n"
     echo -e "  - Begin by running the \"backup\" command to download all available NVIDIA drivers from the internet. It's recommended that you run this whenever there's a new driver release online, so that you have an archive of all previous NVIDIA drivers to easily revert your system in case of problems.\n"
@@ -977,6 +1059,9 @@ case "$1" in
     backup)
         cmd_backup "$2"
     ;;
+    show-date)
+        cmd_show_date
+    ;;
     build-repo)
         cmd_build_repo
     ;;
@@ -1000,11 +1085,6 @@ case "$1" in
         # NOTE: Mainly useful for implementing "restore-direct" updates in the future.
         cmd_base_packages
     ;;
-    prune-ancient)
-        # Developer Command: Erases very outdated junk.
-        # WARNING: Very dangerous if user has incorrectly modified "NVIDIA_BACKUP_DIR".
-        cmd_prune_ancient "$2"
-    ;;
     show-installed)
         cmd_show_installed
     ;;
@@ -1013,6 +1093,10 @@ case "$1" in
     ;;
     uninstall-nvidia)
         cmd_uninstall_nvidia
+    ;;
+    prune-ancient)
+        # WARNING: Very dangerous if user has incorrectly modified "NVIDIA_BACKUP_DIR".
+        cmd_prune_ancient "$2"
     ;;
     reset-archives)
         # Advanced. Not recommended.
@@ -1025,9 +1109,18 @@ esac
 
 
 ###
-# NOTE FOR MAINTAINERS:
+# NOTE FOR GIT DRIVER ARCHIVE MAINTAINERS:
 #
-# The proper way to update the Git repo is by running "backup" for all currently
+# If you want to maintain an online archive, you'll need Git-LFS storage with
+# enough space and bandwidth to handle large archives. It's only possible via
+# paid hosting plans or your own intranet servers. All free Git hosts limit
+# the amount of Git-LFS storage you have.
+#
+# When you have your chosen storage, you simply have to host the "NVIDIA_BACKUP_DIR"
+# as a custom Git-LFS repository, and configure the "ONLINE_ARCHIVE" variables
+# at the top of this script, to point at that repository.
+#
+# The proper way to update your Git repo is by running "backup" for all currently
 # supported Fedora versions, meaning the current release plus previous, and
 # possibly also the upcoming version of Fedora; in other words n-1, n and n+1.
 #
@@ -1037,12 +1130,13 @@ esac
 # The latest data will be downloaded from the RPM Fusion base repository, and
 # all new packages are placed alongside your existing local packages.
 #
-# After the backups are complete, run the secret "prune-ancient" command, which
-# deletes all extremely old packages and all empty folders. This is necessary
+# After the backups are complete, you should run the "prune-ancient" command,
+# which deletes extremely old packages and all empty folders. This is necessary
 # to keep the repository as light and clean as possible (for users and Git host).
 #
 # You should also periodically wipe the online Git repo and force-push a clean
-# version with new history, to avoid hitting your provider's hosting limits.
+# version with new history, to avoid hitting your hosting limits and to ensure
+# quick downloads for your users.
 #
 # Note that you can run "prune-ancient check" to safely see which files are old,
 # without deleting anything yet.
