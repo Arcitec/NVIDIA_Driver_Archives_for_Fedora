@@ -39,12 +39,12 @@ No matter which method you've used, you should now open a Terminal and use this 
 
 1. If your current NVIDIA drivers are broken and you can't reach the desktop, then you should follow the steps in the "Rescuing Unbootable Systems" section first.
 2. Open a Terminal window.
-3. Ensure that you have `git`, and then clone this repository to a local folder.
+3. Ensure that you have `git`, and then clone this repository to a local directory.
 ```sh
 sudo dnf install git
-git clone "https://github.com/Bananaman/NVIDIA_Driver_Archives_for_Fedora.git"
+git clone "https://github.com/Arcitec/NVIDIA_Driver_Archives_for_Fedora.git"
 ```
-4. Go into the project's folder, and execute the "install-deps" command to set up all of the remaining dependencies. **Warning:** If you skip/forget this step, then you won't be able to download the RPM packages (the archived drivers). So be sure to install the dependencies!
+4. Go into the project's directory, and execute the "install-deps" command to set up all of the remaining dependencies. **Warning:** If you skip/forget this step, then you won't be able to download the RPM packages (the archived drivers). So be sure to install the dependencies!
 ```sh
 cd NVIDIA_Driver_Archives_for_Fedora
 ./nvarchive install-deps

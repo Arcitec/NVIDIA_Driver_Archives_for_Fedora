@@ -1,27 +1,25 @@
 #!/usr/bin/env bash
 
 # NVIDIA Driver Archives for Fedora.
-# Author: Bananaman
+# Author: Arcitec
 # Release Version: October 7th, 2022.
-# Project Site: https://github.com/Bananaman/NVIDIA_Driver_Archives_for_Fedora
+# Project Site: https://github.com/Arcitec/NVIDIA_Driver_Archives_for_Fedora
 # SPDX-License-Identifier: GPL-2.0-only
 #
 # This code will only receive updates if necessary (maybe never).
-# The mirrored NVIDIA RPM archives are in a different repository,
-# which will be updated more frequently.
 
 
 # CONFIGURATION:
 
 # Feel free to move the RPM mirror directory somewhere else. By default,
-# it's in the folder "NVIDIA RPMs" relative to the script.
-# WARNING: Don't point this at any folder that contains other (non-mirror)
-# files, since many of our functions will modify/delete the folder contents!
+# it's in the directory "NVIDIA RPMs" relative to the script.
+# WARNING: Don't point this at any directory that contains other (non-mirror)
+# files, since many of our functions will modify/delete the directory contents!
 NVIDIA_BACKUP_DIR="$(dirname -- "$0")/NVIDIA RPMs"
 
 # Storage location for the currently active, local RPM repository.
 # NOTE: You don't need these files anymore after you've installed the RPMs.
-# WARNING: Don't point this at any folder that contains other (non-repo)
+# WARNING: Don't point this at any directory that contains other (non-repo)
 # files, since we erase this entire directory tree when we setup the repo.
 LOCAL_REPO_BASE_DIR="$(dirname -- "$0")/Local Repo"
 
@@ -155,7 +153,7 @@ function erase_corrupt_mirror_and_exit() {
 
 function fetch_driver_archives() {
     # IMPORTANT: This intentionally does NOTHING if the user already has a local
-    # mirror folder, unless they also provide the "force" parameter.
+    # mirror directory, unless they also provide the "force" parameter.
 
     # Fetching the online archives is a one-time automatic operation, after which
     # the user is expected to either run their own "backup" command periodically
@@ -181,7 +179,7 @@ function fetch_driver_archives() {
             return 0
         fi
 
-        # Ask for confirmation if the local mirror folder already exists.
+        # Ask for confirmation if the local mirror directory already exists.
         DO_ONLINE_RESET=1
         if [[ -d "${NVIDIA_BACKUP_DIR}" ]] && [[ "${1}" == "force" ]]; then
             # Compare the local and online mirror's dates, show them to the
@@ -258,11 +256,11 @@ function fetch_driver_archives() {
             trap - EXIT
 
             # Apply existing metadata to ensure that we actually have proper timestamps
-            # when the user looks in the folder. Git doesn't preserve timestamps.
+            # when the user looks in the directory. Git doesn't preserve timestamps.
             read_metadata
 
             # Force a refresh of the Git status, otherwise we'll be extremely sluggish
-            # if we attempt to navigate into that folder and a Powerline plugin tries
+            # if we attempt to navigate into that directory and a Powerline plugin tries
             # to fetch the Git status into the terminal prompt. Because our modified
             # timestamps (from metadata above) will force Git-LFS to verify all local
             # files again. It's best to force that refresh/verification now.
@@ -289,8 +287,8 @@ function write_metadata() {
     # of `stat` almost as fast as native `find`.
     # NOTE: We add `|| exit 1` to all lines, to make the metadata script exit
     # with an error code if any of the commands fail. The only reason why a stat
-    # would fail is when the folder isn't writable. Missing files are a success.
-    # NOTE: We're specifically whitelisting the repository sub-folders, to avoid
+    # would fail is when the directory isn't writable. Missing files are a success.
+    # NOTE: We're specifically whitelisting the repository sub-directories, to avoid
     # generating metadata for the RPM repo's dotfiles and git-directories, etc.
     CURRENT_PWD="${PWD}"
     cd "${NVIDIA_BACKUP_DIR}" && find . -type f \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -print0 | sort -z | xargs -0 stat --printf='touch -mcd "@%Y" -- %N || exit 1\n' > "./metadata-cache"
@@ -302,7 +300,7 @@ function write_metadata() {
 
 function read_metadata() {
     # Applying the metadata again is a simple matter of going into the target
-    # folder if it exists, and then executing the metadata file as a script.
+    # directory if it exists, and then executing the metadata file as a script.
     if [[ ! -f "${NVIDIA_BACKUP_DIR}/metadata-cache" ]]; then return 0; fi
     CURRENT_PWD="${PWD}"
     cd "${NVIDIA_BACKUP_DIR}" && env bash -- "./metadata-cache"
@@ -371,7 +369,7 @@ function cmd_list_tree() {
     fetch_driver_archives
     check_local_date
 
-    # List all local RPMs, except empty folders.
+    # List all local RPMs, except empty directories.
     tree -a -P "*.rpm" --prune "${NVIDIA_BACKUP_DIR}"
 }
 
@@ -393,7 +391,7 @@ function cmd_backup() {
     # NOTE: We only grab 64-bit versions, because other architectures (PowerPC
     # and ARM, etc) don't matter for gaming. And there are no pure 32-bit repos.
     # NOTE: We fetch all online repository packages, except the online repo
-    # metadata (the "repodata/repoview" junk folders). We keep debug packages
+    # metadata (the "repodata/repoview" junk directories). We keep debug packages
     # too, since the debug RPMs only take around 2 megabytes per repo.
     mkdir -p "${NVIDIA_BACKUP_DIR}"
 
@@ -425,8 +423,8 @@ function cmd_backup() {
     # Updates-Testing: The currently testing driver updates in RPM Fusion's repo (if any).
     wget -P "${NVIDIA_BACKUP_DIR}" --mirror -nH -np --cut-dirs=2 --accept "*nvidia*" --regex-type posix --reject-regex '\/(repodata|repoview)\/' "https://download1.rpmfusion.org/nonfree/fedora/updates/testing/${DOWNLOAD_RELEASE}/x86_64/"
 
-    # Silently prune empty folders, since wget creates every folder it traverses.
-    # NOTE: We ignore any errors, since pruning the folders isn't important.
+    # Silently prune empty directories, since wget creates every directory it traverses.
+    # NOTE: We ignore any errors, since pruning the directories isn't important.
     CURRENT_PWD="${PWD}"
     cd "${NVIDIA_BACKUP_DIR}" && find . -type d \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -empty -delete
     cd "${CURRENT_PWD}"
@@ -458,7 +456,7 @@ function cmd_build_repo() {
     check_local_date
 
     # Clean our local repository and create directory structure containing
-    # every mirrored RPM Fusion repository, with sub-folders for the user's
+    # every mirrored RPM Fusion repository, with sub-directories for the user's
     # current Fedora release and CPU architecture, which guarantees that the
     # repos won't be accessed by any other Fedora versions or architectures.
     # NOTE: This matters if the user migrates the OS installation to another
@@ -490,7 +488,7 @@ function cmd_build_repo() {
             # soft symlinks in our repo, with relative (-r) paths from link.
             echo -e "\nLinking local repository packages..."
             # Alternatively, canonicalize symlinks into absolute paths, which might
-            # be useful if user has widely separated their repo and RPM folders:
+            # be useful if user has widely separated their repo and RPM directories:
             #find "${PKG_PARENT_DIR}" -mindepth 1 -maxdepth 1 -type d -name "?" -print0 | xargs -0 readlink -fz | xargs -0 -I '{}' -- ln -fsv -- '{}' "${LOCAL_REPO_DIR}/"
             find "${PKG_PARENT_DIR}" -mindepth 1 -maxdepth 1 -type d -name "?" -print0 | xargs -0 -I '{}' -- ln -fsrv -- '{}' "${LOCAL_REPO_DIR}/"
             exit_if_error $? "Error: Failed to create symbolic links to repository directories in \"${LOCAL_REPO_DIR}\"."
@@ -734,7 +732,7 @@ function cmd_restore_smart() {
 
     # Check if the AKMOD with the desired version exists in the repo.
     # NOTE: We don't check the KMODSRC since we only have a DNF pkgspec globbing
-    # pattern, and we also don't want to enforce a specific repo subfolder, since
+    # pattern, and we also don't want to enforce a specific repo subdirectory, since
     # a newer KMODSRC could existin a different repo, such as "updates". But DNF
     # automatically aborts everything if it can't find the package, so it's fine.
     # NOTE: The quickest way to debug mismatches for all driver packages is to set
@@ -863,7 +861,7 @@ function cmd_restore_direct() {
     REQUIRED_PACKAGES_32BIT=("xorg-x11-drv-nvidia-cuda-libs" "xorg-x11-drv-nvidia-libs")
 
     # Determine the full package file paths.
-    # NOTE: The 32-bit (i686) packages reside under the 64-bit folder.
+    # NOTE: The 32-bit (i686) packages reside under the 64-bit directory.
     echo "Verifying that all local packages exist..."
     FULL_PACKAGE_LIST=()
     MISSING_PACKAGES=0
@@ -874,7 +872,7 @@ function cmd_restore_direct() {
             # Determine the RPM package filename.
             # NOTE: We CANNOT use "fc${FEDORA_VERSION}" for strictest RPM matching,
             # because sometimes packages use an older number, such as "/37/...fc36".
-            # However, it's fine since we match the FEDORA_VERSION folder strictly,
+            # However, it's fine since we match the FEDORA_VERSION directory strictly,
             # and we verify that we've only found 1 RPM matching the pattern.
             PKG_PREFIX="${REQS_ARR[$i]}"
             PKG_FILE=("${PKG_PARENT_DIR}/${PKG_PREFIX:0:1}/${PKG_PREFIX}-${INSTALL_NVIDIA_RAW_VERSION}.fc"*".${PKG_ARCH_NAME}.rpm")
@@ -965,7 +963,7 @@ function cmd_prune_ancient() {
     # when pruning old packages. Git doesn't preserve timestamps.
     read_metadata
 
-    # Delete all files older than 240 days, and all empty folders.
+    # Delete all files older than 240 days, and all empty directories.
     # NOTE: Always do this before packaging updates for a Git repo, since it makes
     # the downloads much easier for users, and most importantly it helps you stay
     # within the allowed repo size limits for your online Git hosting.
@@ -986,7 +984,7 @@ function cmd_prune_ancient() {
         exit_if_error $? "Error: Failed to scan for old packages. Aborting..."
         echo "This was just a test-run. Nothing has been deleted..."
     else
-        # Delete ancient files and empty folders.
+        # Delete ancient files and empty directories.
         echo "Before:"
         du -hs "${NVIDIA_BACKUP_DIR}"
         cd "${NVIDIA_BACKUP_DIR}" && find . -type f \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -mtime +240 -print -delete && find . -type d \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -empty -print -delete
@@ -1131,7 +1129,7 @@ esac
 # all new packages are placed alongside your existing local packages.
 #
 # After the backups are complete, you should run the "prune-ancient" command,
-# which deletes extremely old packages and all empty folders. This is necessary
+# which deletes extremely old packages and all empty directories. This is necessary
 # to keep the repository as light and clean as possible (for users and Git host).
 #
 # You should also periodically wipe the online Git repo and force-push a clean
