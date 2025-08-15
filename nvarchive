@@ -60,14 +60,14 @@ FEDORA_VERSION="$(rpm -E %fedora)"
 
 
 function exit_with_error() {
-    echo -e "$1"
+    echo -e "${1}"
     exit 1
 }
 
 
 function exit_if_error() {
-    if [[ "$1" -ne 0 ]]; then
-        exit_with_error "$2"
+    if [[ "${1}" -ne 0 ]]; then
+        exit_with_error "${2}"
     fi
 }
 
@@ -311,7 +311,7 @@ function read_metadata() {
 
 
 function set_pkg_parent_dir() {
-    # $1 = "INSTALL_NVIDIA_FROM_REPO"
+    # ${1} = "${INSTALL_NVIDIA_FROM_REPO}"
     if [[ "${1}" == "releases" ]]; then
         PKG_PARENT_DIR="${NVIDIA_BACKUP_DIR}/${1}/${FEDORA_VERSION}/Everything/x86_64/os/Packages"
     else
@@ -569,7 +569,7 @@ function cmd_restore_menu() {
     OLD_PS3="${PS3}"
     PS3="?# Choose a number or press Enter to see list again: "
     select RESTORE_PARAMS in "(or q) <Close Menu>" "${ALL_RESTORE_PARAMS[@]}"; do
-        if [[ "${RESTORE_PARAMS}" == "(or q) <Close Menu>" ]] || [[ "$REPLY" == "q" ]] || [[ "$REPLY" == "Q" ]]; then
+        if [[ "${RESTORE_PARAMS}" == "(or q) <Close Menu>" ]] || [[ "${REPLY}" == "q" ]] || [[ "${REPLY}" == "Q" ]]; then
             echo "Closing menu..."
             break
         elif [[ ! -z "${RESTORE_PARAMS}" ]]; then
@@ -618,21 +618,21 @@ function cmd_restore_smart() {
         exit_with_error "Missing Arguments.\n\n\nRequired Parameters:\nrestore-smart <repo> <version> <fedorapkg>\n\n<repo>: One of \"releases\", \"nvidia-driver\", \"updates\" or \"updates-testing\", depending on where your desired version resides.\n\n<version>: The exact NVIDIA driver version you want to install. Check the installable versions with the \"list\" command to see the correct version numbers.\n\n<fedorapkg>: The Fedora package version, such as \"fc37\".\n\n\nCommand Example:\nrestore-smart nvidia-driver 515.65.01-1 fc36"
     fi
 
-    if [[ ! "$1" =~ ^(releases|nvidia-driver|updates|updates-testing)$ ]]; then
+    if [[ ! "${1}" =~ ^(releases|nvidia-driver|updates|updates-testing)$ ]]; then
         exit_with_error "Error: <repo> must be one of \"releases\", \"nvidia-driver\", \"updates\" or \"updates-testing\"."
     fi
 
-    if [[ ! "$2" =~ ^[0-9] ]]; then
+    if [[ ! "${2}" =~ ^[0-9] ]]; then
         exit_with_error "Error: Driver version must begin with a number."
     fi
 
-    if [[ ! "$3" =~ ^fc[0-9]+$ ]]; then
-        exit_with_error "Error: Fedora package version must follow the pattern \"fcXX\", such as \"fc37\"."
+    if [[ ! "${3}" =~ ^fc[0-9]+$ ]]; then
+        exit_with_error "Error: Fedora package version must follow the pattern \"fcXX\", such as \"fc42\"."
     fi
 
-    INSTALL_NVIDIA_FROM_REPO="$1"
-    INSTALL_NVIDIA_RAW_VERSION="$2"
-    INSTALL_NVIDIA_FEDORAPKG="$3"
+    INSTALL_NVIDIA_FROM_REPO="${1}"
+    INSTALL_NVIDIA_RAW_VERSION="${2}"
+    INSTALL_NVIDIA_FEDORAPKG="${3}"
     if [[ "${INSTALL_NVIDIA_FROM_REPO}" == "updates-testing" ]]; then
         INSTALL_NVIDIA_FROM_REPO="updates/testing"
     fi
@@ -826,16 +826,16 @@ function cmd_restore_direct() {
         exit_with_error "Missing Arguments.\n\n\nRequired Parameters:\nrestore-direct <repo> <version>\n\n<repo>: One of \"releases\", \"nvidia-driver\", \"updates\" or \"updates-testing\", depending on where your desired version resides.\n\n<version>: The exact NVIDIA driver version you want to install. Check the installable versions with the \"list\" command to see the correct version numbers.\n\n\nCommand Example:\nrestore-direct nvidia-driver 515.65.01-1"
     fi
 
-    if [[ ! "$1" =~ ^(releases|nvidia-driver|updates|updates-testing)$ ]]; then
+    if [[ ! "${1}" =~ ^(releases|nvidia-driver|updates|updates-testing)$ ]]; then
         exit_with_error "Error: <repo> must be one of \"releases\", \"nvidia-driver\", \"updates\" or \"updates-testing\"."
     fi
 
-    if [[ ! "$2" =~ ^[0-9] ]]; then
+    if [[ ! "${2}" =~ ^[0-9] ]]; then
         exit_with_error "Error: Driver version must begin with a number."
     fi
 
-    INSTALL_NVIDIA_FROM_REPO="$1"
-    INSTALL_NVIDIA_RAW_VERSION="$2"
+    INSTALL_NVIDIA_FROM_REPO="${1}"
+    INSTALL_NVIDIA_RAW_VERSION="${2}"
     if [[ "${INSTALL_NVIDIA_FROM_REPO}" == "updates-testing" ]]; then
         INSTALL_NVIDIA_FROM_REPO="updates/testing"
     fi
@@ -848,7 +848,7 @@ function cmd_restore_direct() {
     fi
 
     # Check for ancient driver requests. We don't support them, unfortunately.
-    if [[ "$2" =~ .*xx.* ]]; then
+    if [[ "${2}" =~ .*xx.* ]]; then
         echo "Sorry: Direct installation mode isn't supported for legacy drivers (anything with \"xx\" in the version number), due to their complicated RPM filenames and their non-standard list of dependencies/requirements. Regular repo-based installation (via the \"restore\" command), or manual installation, is necessary for older GPUs. Try the \"restore\" command first. If that doesn't work, use \"sudo dnf install <list of .RPMs to install>\" to install them yourself, and be sure to add every required RPM to the same command-line to ensure that DNF recognizes their dependencies properly."
         echo -e "\nPull requests are welcome if someone wants to add robust direct installation support for older drivers, but this project will only accept non-hacky solutions, and the dynamic naming patterns and dynamic dependency lists for old drivers isn't a trivial problem to solve in a shell script. I don't even have an old GPU to test with, even if I wanted to implement it. Very sorry for the inconvenience."
         echo -e "\nThe RPM files that you should install manually all exist under the following path:"
@@ -874,7 +874,7 @@ function cmd_restore_direct() {
             # because sometimes packages use an older number, such as "/37/...fc36".
             # However, it's fine since we match the FEDORA_VERSION directory strictly,
             # and we verify that we've only found 1 RPM matching the pattern.
-            PKG_PREFIX="${REQS_ARR[$i]}"
+            PKG_PREFIX="${REQS_ARR[${i}]}"
             PKG_FILE=("${PKG_PARENT_DIR}/${PKG_PREFIX:0:1}/${PKG_PREFIX}-${INSTALL_NVIDIA_RAW_VERSION}.fc"*".${PKG_ARCH_NAME}.rpm")
 
             if [[ "${#PKG_FILE[@]}" -ne 1 ]]; then
@@ -978,7 +978,7 @@ function cmd_prune_ancient() {
     # WARNING: Deletion is very dangerous if the user has incorrectly modified
     # the "NVIDIA_BACKUP_DIR" variable to some path that also houses other data.
     CURRENT_PWD="${PWD}"
-    if [[ "$1" == "check" ]]; then
+    if [[ "${1}" == "check" ]]; then
         # Check what would be deleted, without actually deleting anything.
         cd "${NVIDIA_BACKUP_DIR}" && find . -type f \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -mtime +240 -print
         exit_if_error $? "Error: Failed to scan for old packages. Aborting..."
@@ -991,7 +991,7 @@ function cmd_prune_ancient() {
         exit_if_error $? "Error: Failed to prune old packages. Aborting..."
     fi
     cd "${CURRENT_PWD}"
-    if [[ "$1" != "check" ]]; then
+    if [[ "${1}" != "check" ]]; then
         # Update metadata cache with the timestamps for all remaining files.
         write_metadata
 
@@ -1044,7 +1044,7 @@ function cmd_help() {
 }
 
 
-case "$1" in
+case "${1}" in
     install-deps)
         cmd_install_deps
     ;;
@@ -1055,7 +1055,7 @@ case "$1" in
         cmd_list_tree
     ;;
     backup)
-        cmd_backup "$2"
+        cmd_backup "${2}"
     ;;
     show-date)
         cmd_show_date
@@ -1073,10 +1073,10 @@ case "$1" in
         cmd_restore_menu
     ;;
     restore-smart)
-        cmd_restore_smart "$2" "$3" "$4"
+        cmd_restore_smart "${2}" "${3}" "${4}"
     ;;
     restore-direct)
-        cmd_restore_direct "$2" "$3"
+        cmd_restore_direct "${2}" "${3}"
     ;;
     base-packages)
         # Developer Command: Shows the names of all base packages in the mirror.
@@ -1094,7 +1094,7 @@ case "$1" in
     ;;
     prune-ancient)
         # WARNING: Very dangerous if user has incorrectly modified "NVIDIA_BACKUP_DIR".
-        cmd_prune_ancient "$2"
+        cmd_prune_ancient "${2}"
     ;;
     reset-archives)
         # Advanced. Not recommended.
