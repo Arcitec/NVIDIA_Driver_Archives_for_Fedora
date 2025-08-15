@@ -9,25 +9,28 @@
 # This code will only receive updates if necessary (maybe never).
 
 
+# Determine the absolute path to the script's directory.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+
+
 # CONFIGURATION:
+
+# IMPORTANT: All configuration variables can be provided via the environment.
 
 # Feel free to move the RPM mirror directory somewhere else. By default,
 # it's in the directory "NVIDIA RPMs" relative to the script.
 # WARNING: Don't point this at any directory that contains other (non-mirror)
 # files, since many of our functions will modify/delete the directory contents!
-NVIDIA_BACKUP_DIR="$(dirname -- "$0")/NVIDIA RPMs"
+NVIDIA_BACKUP_DIR="${NVIDIA_BACKUP_DIR:-${SCRIPT_DIR}/NVIDIA RPMs}"
 
 # Storage location for the currently active, local RPM repository.
 # NOTE: You don't need these files anymore after you've installed the RPMs.
 # WARNING: Don't point this at any directory that contains other (non-repo)
 # files, since we erase this entire directory tree when we setup the repo.
-LOCAL_REPO_BASE_DIR="$(dirname -- "$0")/Local Repo"
+LOCAL_REPO_BASE_DIR="${LOCAL_REPO_BASE_DIR:-${SCRIPT_DIR}/Local Repo}"
 
 # Filename for the local YUM (DNF) repo.
-YUM_REPO_FILE="/etc/yum.repos.d/local-nvidia-archive.repo"
-
-# Filename for the local "last updated at" file.
-LAST_UPDATE_FILE="${NVIDIA_BACKUP_DIR}/last-update"
+YUM_REPO_FILE="${YUM_REPO_FILE:-/etc/yum.repos.d/local-nvidia-archive.repo}"
 
 # Online archive repository. Only change if you know what you're doing
 # and you want to host your own repository somewhere. If these variables
@@ -46,17 +49,18 @@ LAST_UPDATE_FILE="${NVIDIA_BACKUP_DIR}/last-update"
 #   mirror repo, which allows this tool to check whether the online archive
 #   has newer data than your local mirror. This value must be set, and the
 #   provided URL must give plaintext responses!
-ONLINE_ARCHIVE_REPO_WEB=""
-ONLINE_ARCHIVE_REPO_GIT=""
-ONLINE_ARCHIVE_CHECK_UPDATE=""
+ONLINE_ARCHIVE_REPO_WEB="${ONLINE_ARCHIVE_REPO_WEB:-}"
+ONLINE_ARCHIVE_REPO_GIT="${ONLINE_ARCHIVE_REPO_GIT:-}"
+ONLINE_ARCHIVE_CHECK_UPDATE="${ONLINE_ARCHIVE_CHECK_UPDATE:-}"
 
 
 # DON'T TOUCH ANYTHING BELOW THIS LINE.
 
-DEBUG="false"
-SCRIPT_INVOKED_PATH="$0"
-SCRIPT_NAME="$(basename -- "$0")"
+DEBUG="${DEBUG:-false}"
+SCRIPT_INVOKED_PATH="${BASH_SOURCE[0]}"
+SCRIPT_NAME="$(basename -- "${SCRIPT_INVOKED_PATH}")"
 FEDORA_VERSION="$(rpm -E %fedora)"
+LAST_UPDATE_FILE="${NVIDIA_BACKUP_DIR}/last-update"
 
 
 function exit_with_error() {
@@ -502,7 +506,7 @@ function cmd_build_repo() {
             # NOTE: The path must be URL-encoded, such as "%20" for spaces, and
             # we use Python's standard library to guarantee optimal URL-encoding.
             # NOTE: If any of the sub-shell commands fail, we catch that in "$?".
-            LOCAL_REPO_BASE_URL="file://$(readlink -f "${LOCAL_REPO_BASE_DIR}/${REPO_SUB_DIR_TARGET}" | python3 -c "import urllib.parse; print(urllib.parse.quote(input()))")/\$releasever/\$basearch/"
+            LOCAL_REPO_BASE_URL="file://$(readlink -f -- "${LOCAL_REPO_BASE_DIR}/${REPO_SUB_DIR_TARGET}" | python3 -c "import urllib.parse; print(urllib.parse.quote(input()))")/\$releasever/\$basearch/"
             exit_if_error $? "Error: Failed to generate local repository URL for \"${LOCAL_REPO_DIR}\"."
 
             # Write the local repository file so that DNF can find the packages.
