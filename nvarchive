@@ -879,7 +879,34 @@ function cmd_restore_direct() {
             # However, it's fine since we match the FEDORA_VERSION directory strictly,
             # and we verify that we've only found 1 RPM matching the pattern.
             PKG_PREFIX="${REQS_ARR[${i}]}"
-            PKG_FILE=("${PKG_PARENT_DIR}/${PKG_PREFIX:0:1}/${PKG_PREFIX}-${INSTALL_NVIDIA_RAW_VERSION}.fc"*".${PKG_ARCH_NAME}.rpm")
+            if [[ "${PKG_PREFIX}" =~ ^nvidia- ]]; then
+                # Utility packages: The "nvidia-" packages may use an older revision
+                # than the main driver packages, such as "-1" instead of "-2". We'll
+                # scan for the driver version but without any revision constraints.
+                # NOTE: We scan for "-*.fc" to find all revisions for the driver version.
+                INSTALL_NVIDIA_VERSION_NO_REV="$(echo "${INSTALL_NVIDIA_RAW_VERSION}" | sed -E 's,-[0-9]+$,,g')"
+                PKG_FILE=("${PKG_PARENT_DIR}/${PKG_PREFIX:0:1}/${PKG_PREFIX}-${INSTALL_NVIDIA_VERSION_NO_REV}-"*".fc"*".${PKG_ARCH_NAME}.rpm")
+                
+                # Find the latest revision for the matching package.
+                # NOTE: We use Python to perform the complex task of determining
+                # which revision is the newest utility package for the given driver
+                # version, in case multiple packages matched the query.
+                # NOTE: The Python algorithm works by taking all the arguments
+                # and determining the "max" value based on turning each argument
+                # into a "sort key". The key conversion looks for "-<rev>.fc<fcver>."
+                # and then converts the "revision" into an integer if a match
+                # was found; otherwise "-1" to make the max() call deprioritize
+                # it. In case multiple arguments have the same sort-key value,
+                # the first value with that key wins (the earliest argument).
+                # NOTE: The crazy lambda within a lambda is necessary since one-liner
+                # Python scripts are very limited. The outer lambda just creates
+                # and immediately runs the inner lambda, giving it the regex-search
+                # result. The inner lambda converts that to a sort-key number.
+                PKG_FILE=("$(python3 -c 'import re,sys; print(max(sys.argv[1:], key=lambda f: (lambda m: int(m.group(1), 10) if m else -1)(re.search(r"-(\d+)\.fc\d+\.", f))), end="")' "${PKG_FILE[@]}")")
+            else
+                # Main driver packages: Always require the exact revision.
+                PKG_FILE=("${PKG_PARENT_DIR}/${PKG_PREFIX:0:1}/${PKG_PREFIX}-${INSTALL_NVIDIA_RAW_VERSION}.fc"*".${PKG_ARCH_NAME}.rpm")
+            fi
 
             if [[ "${#PKG_FILE[@]}" -ne 1 ]]; then
                 exit_with_error "Error: Too many matches for RPM filename pattern (found ${#PKG_FILE[@]} matches, expected 1): ${PKG_FILE[@]}"
