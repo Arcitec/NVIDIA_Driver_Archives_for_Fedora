@@ -62,6 +62,16 @@ SCRIPT_NAME="$(basename -- "${SCRIPT_INVOKED_PATH}")"
 FEDORA_VERSION="$(rpm -E %fedora)"
 LAST_UPDATE_FILE="${NVIDIA_BACKUP_DIR}/last-update"
 
+if [[ "${FEDORA_VERSION}" -ge 41 ]]; then
+    # Fedora 41 and newer uses DNF5.
+    USE_DNF_VERSION="5"
+    DNF_ARG_NOBEST="--no-best"
+else
+    # Fedora 40 and older should use DNF4 instead.
+    USE_DNF_VERSION="4"
+    DNF_ARG_NOBEST="--nobest"
+fi
+
 
 function exit_with_error() {
     echo -e "${1}"
@@ -93,7 +103,7 @@ function check_online_date() {
         if [[ -z "${ONLINE_ARCHIVE_DATE}" ]]; then
             echo "Warning: Unable to check for online updates at \"${ONLINE_ARCHIVE_REPO_WEB}\"."
         else
-            # NOTE: Strategic leading space to make it line up with the local date.
+            # NOTE: Strategic leading space to make it line up ":" of local date.
             display_formatted_date " Online Mirror:" "${ONLINE_ARCHIVE_DATE}"
         fi
     fi
@@ -334,6 +344,7 @@ function list_available_akmods() {
 
 function check_if_stupid() {
     # Make sure that the user doesn't accidentally blow up their whole system.
+    # NOTE: DNF4 and DNF5 both use the same global configuration file location.
     if [[ -f /etc/dnf/dnf.conf ]] && grep -qE "(assumeyes|defaultyes)\\s*=" /etc/dnf/dnf.conf; then
         exit_with_error "Error: You have dangerous options in your /etc/dnf/dnf.conf. Remove your \"assumeyes\" or \"defaultyes\" values, since they can easily break your system by wiping everything automatically if there are serious package conflicts. You should always read each DNF question and answer via your brain. Aborting installation..."
     fi
@@ -409,7 +420,7 @@ function cmd_backup() {
     # some mirror's sometimes-desynced repositories. Sorry about that...
     # We use wget with just 1 connection, to avoid overloading the server,
     # and we only download the drivers for the user's current Fedora version,
-    # which is usually only around 2 GB at its peak by the time a Fedora release
+    # which is usually only around 2.5 GB at its peak by the time a Fedora release
     # reaches its end of life. We do incremental downloads to reduce transfers.
     # IMPORTANT: If anyone has ideas for spreading the load while still having
     # highly accurate package mirroring, please submit pull requests!
@@ -425,6 +436,7 @@ function cmd_backup() {
     wget -P "${NVIDIA_BACKUP_DIR}" --mirror -nH -np --cut-dirs=2 --accept "*nvidia*" --regex-type posix --reject-regex '\/(repodata|repoview)\/' "https://download1.rpmfusion.org/nonfree/fedora/updates/${DOWNLOAD_RELEASE}/x86_64/"
 
     # Updates-Testing: The currently testing driver updates in RPM Fusion's repo (if any).
+    # NOTE: These versions are sometimes buggy and unstable. That's the point of testing.
     wget -P "${NVIDIA_BACKUP_DIR}" --mirror -nH -np --cut-dirs=2 --accept "*nvidia*" --regex-type posix --reject-regex '\/(repodata|repoview)\/' "https://download1.rpmfusion.org/nonfree/fedora/updates/testing/${DOWNLOAD_RELEASE}/x86_64/"
 
     # Silently prune empty directories, since wget creates every directory it traverses.
@@ -434,6 +446,7 @@ function cmd_backup() {
     cd "${CURRENT_PWD}"
 
     # Update metadata cache with the timestamps for all files.
+    # NOTE: Wget in "mirroring" mode above preserves the server's timestamps.
     write_metadata
 
     # Places a UNIX timestamp date-tag in the mirror directory, which allows
@@ -668,8 +681,8 @@ function cmd_restore_smart() {
     # NOTE: When requesting an older version via DNF, we MUST provide the version
     # number WITH its "fcXX" suffix as the package name, since "fcXX" is part of
     # the version number. If we omit the "fcXX", the package won't be found.
-    # NOTE: Use `dnf --showduplicates list "akmod-nvidia*"` to list all versions
-    # of the main driver, `dnf --showduplicates list "xorg-x11-drv-nvidia-*cuda"`
+    # NOTE: Use `dnf list --showduplicates "akmod-nvidia*"` to list all versions
+    # of the main driver, `dnf list --showduplicates "xorg-x11-drv-nvidia-*cuda"`
     # to list all versions of the CUDA library (naming pattern for old GPUs
     # differs greatly from the modern version).
     #
@@ -770,11 +783,11 @@ function cmd_restore_smart() {
     cmd_build_repo
 
     # Educate the user about the installation process for older drivers.
-    echo -e "\n\n============\n\nPLEASE READ:\n\nAttempting installation. Please read CAREFULLY, and answer NO to the installation if things seem like they would break your system... Check the version numbers of all components that will be installed. Only answer YES if everything seems correct! This installation method automatically resolves all dependencies, but you must still be sure that the results look correct before proceeding, since installing older drivers might lead to the removal of other software that depends on the newer drivers!"
+    echo -e "\n\n====================\n\n\033[31m*** PLEASE READ: ***\033[0m\n\nAttempting installation. Please read CAREFULLY, and answer NO to the installation if things seem like they would break your system... Check the version numbers of all components that will be installed. Only answer YES if everything seems correct! This installation method automatically resolves all dependencies, but you must still be sure that the results look correct before proceeding, since installing older drivers might lead to the removal of other software that depends on the newer drivers!"
     echo -e "\nThe installation will begin by removing your existing drivers, otherwise you will often end up with a mix of different NVIDIA package versions on your system, whenever your existing packages are marked as being compatible with a newer driver too."
-    echo -e "\nNOTE: It's normal that \"opencl-filesystem\" will be removed as an unused dependency. It's also normal that \"kmod-nvidia\" will be removed as an unused dependency if you're replacing a previous driver, because that's a virtual package created locally after you install a driver, and its only purpose is to make your current driver's kernel module easy to uninstall again."
-    echo -e "\nIMPORTANT: If you're installing an older driver, you will see some messages about DNF skipping \"akmod-nvidia\" due to \"conflicts\", and that it's skipping the CUDA package due to \"broken dependencies\", but that is totally normal. It just means that DNF was unable to install the newest version of CUDA since you've chosen an older AKMOD version, and means that it had to choose an older CUDA version that's compatible with your chosen AKMOD (NVIDIA Driver) version. It's totally normal, and you should simply ignore those warnings! Your chosen NVIDIA driver and its newest, compatible CUDA version will be installed!"
-    echo -e "\nStarting installation in 6 seconds... Please scroll back and read this information before you continue!\n\n============\n"
+    echo -e "\nNOTE: It's normal that \"opencl-filesystem\" and \"openssl\" will be removed as unused dependencies. It's also normal that \"kmod-nvidia\" will be removed as an unused dependency if you're replacing a previous driver, because that's a virtual package created locally after you install a driver, and its only purpose is to make your current driver's kernel module easy to uninstall again."
+    echo -e "\n\n\033[31m*** IMPORTANT: ***\033[0m\n\n- If you're installing an older driver, you will see some messages about DNF skipping \"akmod-nvidia\" due to \"conflicts\", and that it's skipping the newest CUDA package and \"kmod-nvidia\" due to \"broken dependencies\", but that is totally normal.\n\n- The warning just means that DNF was unable to install the newest version of CUDA since you've chosen an older AKMOD version, and means that it had to choose an older CUDA version that's compatible with your chosen AKMOD (NVIDIA Driver) version.\n\n- It's totally normal, and you should simply ignore those warnings! Your chosen NVIDIA driver and its newest, compatible CUDA version will be installed!"
+    echo -e "\n\033[31;1;4mStarting installation in 6 seconds... Please scroll back and read this information before you continue!\033[0m\n\n====================\n"
     sleep 6  # Give them time to read...
 
     # Delete their existing drivers, to ensure a proper installation.
@@ -811,12 +824,14 @@ function cmd_restore_smart() {
     # latest CUDA version if they still have a compatible version installed.
     # NOTE: As mentioned earlier, we must specify the KMODSRC version, otherwise
     # it will install it from the newest driver, which won't be able to compile.
+    # NOTE: DNF4 can take `--flags` in any order, whereas DNF5 requires some
+    # flags to be placed before the command and others to come after it.
     echo -e "\n\nRefreshing repositories and installing your chosen NVIDIA driver..."
-    sudo dnf --refresh --allowerasing --nobest install "${AKMOD_PKG_NAME}" "${KMODSRC_PKG_NAME}" "${CUDA_PKG_NAME}"
+    sudo dnf --refresh "${DNF_ARG_NOBEST}" install --allowerasing "${AKMOD_PKG_NAME}" "${KMODSRC_PKG_NAME}" "${CUDA_PKG_NAME}"
     exit_if_error $? "Error: Installation failed or was canceled by user."
 
     # Warn about having to wait until the kernel module has been built.
-    echo -e "\n\n============\n\nWARNING: Do NOT restart your computer until the kernel module has been built.\n\nTYPE THE FOLLOWING COMMAND NOW TO SEE YOUR CURRENT STATUS:\n\"${SCRIPT_INVOKED_PATH}\" check-kmod\n\nIf it says \"Module nvidia not found\", it means that the kernel module is still being compiled. It can take up to 5 minutes on slow computers, and around a minute on modern computers.\n\nWhen the build process is complete, it will output a version number, which should match the driver that you just installed. Then you're safe to reboot your computer.\n\nIf the module hasn't been built after several minutes, there might be a conflict with your current kernel version. In that case, type \"sudo akmods --force\" to attempt a build manually, which should then tell you if there's any problem!"
+    echo -e "\n\n====================\n\n\033[31;1;4mWARNING: Do NOT restart your computer until the kernel module has been built.\033[0m\n\nTYPE THE FOLLOWING COMMAND NOW TO SEE YOUR CURRENT STATUS:\n\"${SCRIPT_INVOKED_PATH}\" check-kmod\n\nIf it says \"Module nvidia not found\", it means that the kernel module is still being compiled. It can take up to 5 minutes on slow computers, and around a minute on modern computers.\n\nWhen the build process is complete, it will output a version number, which should match the driver that you just installed. Then you're safe to reboot your computer.\n\nIf the module hasn't been built after several minutes, there might be a conflict with your current kernel version. In that case, type \"sudo akmods --force\" to attempt a build manually, which should then tell you if there's any problem!"
 }
 
 
@@ -937,14 +952,16 @@ function cmd_restore_direct() {
     # NOTE: We must ask it to do all at once, since dependencies won't
     # be found automatically when we're installing local files.
     # NOTE: Spaces in paths are supported, thanks to quoted expansion.
+    # NOTE: DNF4 can take `--flags` in any order, whereas DNF5 requires some
+    # flags to be placed before the command and others to come after it.
     echo -e "\nAttempting installation. Please read CAREFULLY, and answer NO to the installation if things seem like they would break your system... Check the version numbers of all components that will be installed. Only answer YES if everything seems correct! This manual installation method doesn't resolve the dependencies automatically, so you must be sure that the results look correct before proceeding!"
     echo -e "\nNOTE: It's normal that \"kmod-nvidia\" will be removed as an unused dependency if you're replacing a previous driver, because that's a virtual package created locally after you install a driver, and its only purpose is to make your current driver's kernel module easy to uninstall again.\n"
     sleep 3  # Give them time to read...
-    sudo dnf --allowerasing install "${FULL_PACKAGE_LIST[@]}"
+    sudo dnf install --allowerasing "${FULL_PACKAGE_LIST[@]}"
     exit_if_error $? "Error: Installation failed or was canceled by user."
 
     # Warn about having to wait until the kernel module has been built.
-    echo -e "\n\n============================\n\nWARNING: Do NOT restart your computer until the kernel module has been built.\n\nTYPE THE FOLLOWING COMMAND NOW TO SEE YOUR CURRENT STATUS:\n\"${SCRIPT_INVOKED_PATH}\" check-kmod\n\nIf it says \"Module nvidia not found\", it means that the kernel module is still being compiled. It can take up to 5 minutes on slow computers, and around a minute on modern computers.\n\nWhen the build process is complete, it will output a version number, which should match the driver that you just installed. Then you're safe to reboot your computer.\n\nIf the module hasn't been built after several minutes, there might be a conflict with your current kernel version. In that case, type \"sudo akmods --force\" to attempt a build manually, which should then tell you if there's any problem!"
+    echo -e "\n\n====================\n\n\033[31;1;4mWARNING: Do NOT restart your computer until the kernel module has been built.\033[0m\n\nTYPE THE FOLLOWING COMMAND NOW TO SEE YOUR CURRENT STATUS:\n\"${SCRIPT_INVOKED_PATH}\" check-kmod\n\nIf it says \"Module nvidia not found\", it means that the kernel module is still being compiled. It can take up to 5 minutes on slow computers, and around a minute on modern computers.\n\nWhen the build process is complete, it will output a version number, which should match the driver that you just installed. Then you're safe to reboot your computer.\n\nIf the module hasn't been built after several minutes, there might be a conflict with your current kernel version. In that case, type \"sudo akmods --force\" to attempt a build manually, which should then tell you if there's any problem!"
 }
 
 
