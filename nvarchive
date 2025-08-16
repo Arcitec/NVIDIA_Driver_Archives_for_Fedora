@@ -2,7 +2,7 @@
 
 # NVIDIA Driver Archives for Fedora.
 # Author: Arcitec
-# Release Version: October 7th, 2022.
+# Release Version: August 15th, 2025.
 # Project Site: https://github.com/Arcitec/NVIDIA_Driver_Archives_for_Fedora
 # SPDX-License-Identifier: GPL-2.0-only
 #
@@ -632,7 +632,7 @@ function cmd_restore_smart() {
     # Verify the user's arguments.
     # NOTE: Deeper validation will happen when we scan for packages later.
     if [[ $# -ne 3 ]]; then
-        exit_with_error "Missing Arguments.\n\n\nRequired Parameters:\nrestore-smart <repo> <version> <fedorapkg>\n\n<repo>: One of \"releases\", \"nvidia-driver\", \"updates\" or \"updates-testing\", depending on where your desired version resides.\n\n<version>: The exact NVIDIA driver version you want to install. Check the installable versions with the \"list\" command to see the correct version numbers.\n\n<fedorapkg>: The Fedora package version, such as \"fc37\".\n\n\nCommand Example:\nrestore-smart nvidia-driver 515.65.01-1 fc36"
+        exit_with_error "Missing Arguments.\n\n\nRequired Parameters:\nrestore-smart <repo> <version> <fedorapkg>\n\n<repo>: One of \"releases\", \"nvidia-driver\", \"updates\" or \"updates-testing\", depending on where your desired version resides.\n\n<version>: The exact NVIDIA driver version you want to install. Check the installable versions with the \"list\" command to see the correct version numbers.\n\n<fedorapkg>: The Fedora package version, such as \"fc42\".\n\n\nCommand Example:\nrestore-smart nvidia-driver 575.64.05-2 fc42"
     fi
 
     if [[ ! "${1}" =~ ^(releases|nvidia-driver|updates|updates-testing)$ ]]; then
@@ -842,7 +842,7 @@ function cmd_restore_direct() {
     # Verify the user's arguments.
     # NOTE: Deeper validation will happen when we scan for packages later.
     if [[ $# -ne 2 ]]; then
-        exit_with_error "Missing Arguments.\n\n\nRequired Parameters:\nrestore-direct <repo> <version>\n\n<repo>: One of \"releases\", \"nvidia-driver\", \"updates\" or \"updates-testing\", depending on where your desired version resides.\n\n<version>: The exact NVIDIA driver version you want to install. Check the installable versions with the \"list\" command to see the correct version numbers.\n\n\nCommand Example:\nrestore-direct nvidia-driver 515.65.01-1"
+        exit_with_error "Missing Arguments.\n\n\nRequired Parameters:\nrestore-direct <repo> <version>\n\n<repo>: One of \"releases\", \"nvidia-driver\", \"updates\" or \"updates-testing\", depending on where your desired version resides.\n\n<version>: The exact NVIDIA driver version you want to install. Check the installable versions with the \"list\" command to see the correct version numbers.\n\n\nCommand Example:\nrestore-direct nvidia-driver 575.64.05-2"
     fi
 
     if [[ ! "${1}" =~ ^(releases|nvidia-driver|updates|updates-testing)$ ]]; then
@@ -867,6 +867,7 @@ function cmd_restore_direct() {
     fi
 
     # Check for ancient driver requests. We don't support them, unfortunately.
+    # NOTE: They are supported in the intelligent, automated "restore" mode.
     if [[ "${2}" =~ .*xx.* ]]; then
         echo "Sorry: Direct installation mode isn't supported for legacy drivers (anything with \"xx\" in the version number), due to their complicated RPM filenames and their non-standard list of dependencies/requirements. Regular repo-based installation (via the \"restore\" command), or manual installation, is necessary for older GPUs. Try the \"restore\" command first. If that doesn't work, use \"sudo dnf install <list of .RPMs to install>\" to install them yourself, and be sure to add every required RPM to the same command-line to ensure that DNF recognizes their dependencies properly."
         echo -e "\nPull requests are welcome if someone wants to add robust direct installation support for older drivers, but this project will only accept non-hacky solutions, and the dynamic naming patterns and dynamic dependency lists for old drivers isn't a trivial problem to solve in a shell script. I don't even have an old GPU to test with, even if I wanted to implement it. Very sorry for the inconvenience."
@@ -875,9 +876,31 @@ function cmd_restore_direct() {
     fi
 
     # List of packages we'll install from each architecture.
-    # NOTE: Look this up via `dnf list "*nvidia*"` and see your installed packages.
-    REQUIRED_PACKAGES_64BIT=("akmod-nvidia" "nvidia-persistenced" "nvidia-settings" "xorg-x11-drv-nvidia" "xorg-x11-drv-nvidia-cuda" "xorg-x11-drv-nvidia-cuda-libs" "xorg-x11-drv-nvidia-kmodsrc" "xorg-x11-drv-nvidia-libs" "xorg-x11-drv-nvidia-power")
-    REQUIRED_PACKAGES_32BIT=("xorg-x11-drv-nvidia-cuda-libs" "xorg-x11-drv-nvidia-libs")
+    # NOTE: Look this up via `dnf list --installed "*nvidia*"` to see your installed packages.
+    declare -a REQUIRED_PACKAGES_64BIT=()
+    REQUIRED_PACKAGES_64BIT+=("akmod-nvidia")
+    if [[ "${FEDORA_VERSION}" -ge 40 ]]; then
+        # NOTE: It's now a requirement on Fedora 40-42 and higher. It has existed
+        # longer than that (even in Fedora 36), but it was optional and was only
+        # required in special circumstances back then.
+        REQUIRED_PACKAGES_64BIT+=("nvidia-modprobe")
+    fi
+    REQUIRED_PACKAGES_64BIT+=("nvidia-persistenced")
+    REQUIRED_PACKAGES_64BIT+=("nvidia-settings")
+    REQUIRED_PACKAGES_64BIT+=("xorg-x11-drv-nvidia")
+    REQUIRED_PACKAGES_64BIT+=("xorg-x11-drv-nvidia-cuda")
+    REQUIRED_PACKAGES_64BIT+=("xorg-x11-drv-nvidia-cuda-libs")
+    REQUIRED_PACKAGES_64BIT+=("xorg-x11-drv-nvidia-kmodsrc")
+    REQUIRED_PACKAGES_64BIT+=("xorg-x11-drv-nvidia-libs")
+    REQUIRED_PACKAGES_64BIT+=("xorg-x11-drv-nvidia-power")
+    if [[ "${FEDORA_VERSION}" -ge 40 ]]; then
+        # NOTE: Was introduced in Fedora 40, or possibly slightly earlier (38-39),
+        # but it didn't exist in Fedora 36-37 (verified via an old repo dump).
+        REQUIRED_PACKAGES_64BIT+=("xorg-x11-drv-nvidia-xorg-libs")
+    fi
+    declare -a REQUIRED_PACKAGES_32BIT=()
+    REQUIRED_PACKAGES_32BIT+=("xorg-x11-drv-nvidia-cuda-libs")
+    REQUIRED_PACKAGES_32BIT+=("xorg-x11-drv-nvidia-libs")
 
     # Determine the full package file paths.
     # NOTE: The 32-bit (i686) packages reside under the 64-bit directory.
@@ -993,11 +1016,16 @@ function cmd_uninstall_nvidia() {
 
     # Removes all of the RPMFusion packages, and the "kmod" dynamic package
     # which contains the akmod's locally compiled kernel module.
-    # NOTE: We skip native Fedora packages, such as "nvidia-gpu-firmware".
-    # NOTE: Technically, a lot of this would be removed via dependency solver,
-    # but we still remove everything explicitly just to be more thorough.
+    # NOTE: We skip native Fedora packages, such as "nvidia-gpu-firmware", and
+    # all optional NVIDIA tools, such as "nvidia-container-toolkit-base".
+    # NOTE: Technically, a lot of this would be removed via DNF's dependency
+    # solver, when it notices that the main driver is being removed (since most
+    # of the NVIDIA driver packages depend on the main driver). However, we still
+    # remove everything explicitly just to be more thorough. Any future packages
+    # which don't match these instructions will of course be removed by DNF's
+    # automatic dependency resolver, so they aren't any concern either.
     # NOTE: We don't do any strict error-checking, since DNF treats previously
-    # removed packages as an error if we attempt to remove them again.
+    # removed packages as a harmless warning if we attempt to remove them again.
     echo "Uninstalling all NVIDIA packages from your system..."
     sudo dnf rm akmod-nvidia\* kmod-nvidia\* nvidia-modprobe\* nvidia-persistenced\* nvidia-settings\* nvidia-vaapi-driver\* nvidia-xconfig\* xorg-x11-drv-nvidia\*
 }
@@ -1072,17 +1100,17 @@ function cmd_help() {
     echo -e "  - show-repo: Show all contents of your local repo. Doesn't display the actual packages, but allows you to see the metadata and directory structures.\n"
     echo -e "  - delete-repo: Deletes the local repository and all references to it from your computer. This doesn't delete your actual mirrored data. It's useful if you don't want to see the local repo anymore after you've installed the desired drivers. There is no harm in removing the repo after installation, since you can simply re-add the repository if you realize that you want some extra, optional NVIDIA packages later.\n"
     echo -e "  - restore: The easiest way for beginners to install archived drivers. It lets you choose from a list of all available drivers, and then runs the \"restore-smart\" command automatically.\n"
-    echo -e "  - restore-smart <repo> <version> <fedorapkg>: Install packages from backups. Run the command without arguments for more help. Only installs packages matching your current Fedora version. Creates a local package repository and uses DNF's dependency resolver to accurately install all required and optional packages.\n"
-    echo -e "  - restore-direct <repo> <version>: Alternative installation method, which directly installs the RPM files without any automatic dependency resolution. Not recommended, due to the risk of missing useful \"optional\" dependencies. Try \"restore\" first, which performs safe, automatic dependency resolution.\n"
+    echo -e "  - restore-smart <repo> <version> <fedorapkg>: Install packages from backups. Run the command without arguments for more help. Only installs packages matching your current Fedora version. Creates a local package repository and uses DNF's dependency resolver to accurately install all required and optional packages. This mode's algorithm is very intelligent and should work with all future Fedora versions forever!\n"
+    echo -e "  - restore-direct <repo> <version>: Alternative installation method, which directly installs the RPM files without any automatic dependency resolution. Not recommended, due to the risk of missing useful \"optional\" dependencies, or the addition of future packages introduced in newer Fedora versions. Try \"restore\" first, which performs safe, automatic dependency resolution.\n"
     echo -e "  - show-installed: Shows all currently installed NVIDIA packages on your machine.\n"
     echo -e "  - check-kmod: Checks the version and existence of your NVIDIA kernel module.\n"
     echo -e "  - uninstall-nvidia: Cleans your machine by uninstalling all NVIDIA driver packages, regardless of how they were originally installed.\n"
-    echo -e "  - prune-ancient [\"check\"]: Cleans up your local mirror by deleting all driver packages that are older than 240 days. Useful when your local backups have been growing for a while. You can add the optional \"check\" parameter to do a safe test-run which simply shows which files will be deleted, without actually removing anything.\n"
+    echo -e "  - prune-ancient [\"check\"]: Cleans up your local mirror by deleting all driver packages that are older than 240 days. Useful when your local backups have been growing for a while. You can add the optional \"check\" parameter to do a safe test-run which shows the files that will be deleted, without actually removing anything.\n"
     echo -e "  - reset-archives: (Advanced) Erases your entire local mirror and fetches the configured Git backup of the NVIDIA drivers. This is only intended for companies or people who want to self-host the driver archives on their intranet or online. It's recommended that most people use the \"backup\" command instead, which performs smaller, incremental downloads and is much faster for you. However, if you have a fast internet connection and enough storage space to host driver archives on your own server, then you could use this command to avoid putting any load on RPM Fusion's servers. It will only erase your local mirror and download new data if the online archive is newer than yours, so it's always safe to run this command to check for updates at your custom Git repository.\n"
     echo -e "\nQuick Start Guide:\n"
     echo -e "  - IMPORTANT: If you've never used this tool before, you *must* run the \"install-deps\" command first, to ensure that you have all required dependencies before attempting to use *any* other commands. This tool won't work until you've installed and loaded the dependencies!\n"
     echo -e "  - Begin by running the \"backup\" command to download all available NVIDIA drivers from the internet. It's recommended that you run this whenever there's a new driver release online, so that you have an archive of all previous NVIDIA drivers to easily revert your system in case of problems.\n"
-    echo -e "  - Next, run \"restore\" and use the easy menu to install the desired drivers. It shows all locally mirrored drivers that are compatible with your version of Fedora. Just be sure to pick a driver that's compatible with your graphics card and your current kernel. But if you make a mistake, you can always boot the system with the open-source Nouveau drivers instead, and then simply install a different NVIDIA driver via this menu.\n"
+    echo -e "  - Next, run \"restore\" and use the easy menu to install the desired drivers. It shows all locally mirrored drivers that are compatible with your version of Fedora. Just be sure to pick a driver that's compatible with your graphics card and your current kernel. But if you make a mistake, you can always boot the system with the open-source Nouveau/Nova drivers instead, and then simply install a different NVIDIA driver via this menu.\n"
     echo -e "  - Lastly, you may want to run \"delete-repo\" to remove the local archive repo from your system, if you don't want to see it in DNF anymore. This doesn't erase your mirrored drivers. It simply removes the local repo from your machine, which is totally harmless, and it can be instantly reconstructed again via the \"build-repo\" command.\n"
     echo -e "  - Run \"show-installed\" if you are curious about your currently installed NVIDIA driver packages.\n"
     echo -e "  - If you ever want to completely uninstall the NVIDIA drivers from your computer, simply run the \"uninstall-nvidia\" command.\n"
