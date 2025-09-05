@@ -2,7 +2,7 @@
 
 # NVIDIA Driver Archives for Fedora.
 # Author: Arcitec
-# Release Version: August 15th, 2025.
+# Release Version: September 5th, 2025.
 # Project Site: https://github.com/Arcitec/NVIDIA_Driver_Archives_for_Fedora
 # SPDX-License-Identifier: GPL-2.0-only
 #
@@ -204,8 +204,8 @@ function fetch_driver_archives() {
                 exit 0
             fi
 
-            echo -e "\nPlease consider using the \"backup\" command instead. That command is incremental, which is much faster than resetting everything and syncing the whole online archive again. The main reason why you might prefer to do this full reset via our GitHub archive is if you want to reduce the load on RPM Fusion's servers."
-            echo -e "\nYou can also manually check the contents of our online archive, to be sure that it contains what you want before you decide to do a reset:\n${ONLINE_ARCHIVE_REPO_WEB}\n"
+            echo -e "\nPlease consider using the \"backup\" command instead. That command is incremental, which is much faster than resetting everything and syncing the whole online archive again. The main reason why you might prefer to do this full reset via a Git-LFS archive is if you want to reduce the load on RPM Fusion's servers."
+            echo -e "\nYou can also manually check the contents of your online archive, to be sure that it contains what you want before you decide to do a reset:\n${ONLINE_ARCHIVE_REPO_WEB}\n"
 
             while true; do
                 read -p "Are you sure that you want to erase your local archive and fetch the latest online archive? [y/n] " answer
@@ -236,7 +236,7 @@ function fetch_driver_archives() {
         fi
 
         if [[ "${DO_ONLINE_RESET}" -eq 1 ]]; then
-            echo -e "\nFetching online NVIDIA driver archive. This is usually around 4-5 gigabytes of data. Please be patient...\n"
+            echo -e "\nFetching online NVIDIA driver archive. This is usually several gigabytes of data. Please be patient...\n"
             echo -e "You can see the RPM download progress via the \"Filtering content: x%\" progress line of the Git output below.\n"
             echo -e "WARNING: If you abort this download, we will automatically erase the corrupt/incomplete local mirror and restart the same download the next time you run a command. So please, relax and be patient... <3\n"
             echo -e "***\n"
@@ -255,7 +255,7 @@ function fetch_driver_archives() {
             trap erase_corrupt_mirror_and_exit EXIT
 
             # Clone the entire repository. This is done via Git-LFS, and takes
-            # a while since the repository is usually around 4-5 GB.
+            # a while since the repository is usually several gigabytes.
             # NOTE: If the user doesn't have Git-LFS installed, then they won't
             # actually be fetching any RPMs. That's their problem if they didn't
             # read the fucking manual though. It's literally the first step both
@@ -305,7 +305,7 @@ function write_metadata() {
     # NOTE: We're specifically whitelisting the repository sub-directories, to avoid
     # generating metadata for the RPM repo's dotfiles and git-directories, etc.
     CURRENT_PWD="${PWD}"
-    cd "${NVIDIA_BACKUP_DIR}" && find . -type f \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -print0 | sort -z | xargs -0 stat --printf='touch -mcd "@%Y" -- %N || exit 1\n' > "./metadata-cache"
+    cd "${NVIDIA_BACKUP_DIR}" && find . -type f \( -path "./koji/*" -or -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -print0 | sort -z | xargs -0 stat --printf='touch -mcd "@%Y" -- %N || exit 1\n' > "./metadata-cache"
     if [[ $? -ne 0 ]]; then echo "Error while writing metadata cache. Aborting..."; exit 1; fi
     cd "${CURRENT_PWD}"
     if [[ $? -ne 0 ]]; then echo "Error while accessing previous working directory. Aborting..."; exit 1; fi
@@ -338,7 +338,7 @@ function list_available_akmods() {
     # List drivers for user's current Fedora version, from all repos.
     # NOTE: We output in a format that's compatible with both "restore-smart"
     # and "restore-direct" (the latter doesn't need the fcXX number).
-    find "${NVIDIA_BACKUP_DIR}" -name "akmod-nvidia-*.rpm" | grep -E "/(releases|nvidia-driver|updates|updates/testing)/${FEDORA_VERSION}/.*?x86_64/" | sed -E 's,^.+?/(releases|nvidia-driver|updates|updates/testing)/[0-9]+/.*?x86_64.*?/a/akmod-nvidia-(.+?)\.(fc[0-9]+)\..*$,\1 \2 \3,g' | sed 's,updates/testing,updates-testing,g' | sort -u
+    find "${NVIDIA_BACKUP_DIR}" -name "akmod-nvidia-*.rpm" | grep -E "/(releases|nvidia-driver|updates|updates/testing|koji)/${FEDORA_VERSION}/.*?x86_64/" | sed -E 's,^.+?/(releases|nvidia-driver|updates|updates/testing|koji)/[0-9]+/.*?x86_64.*?/a/akmod-nvidia-(.+?)\.(fc[0-9]+)\..*$,\1 \2 \3,g' | sed 's,updates/testing,updates-testing,g' | sort -u
 }
 
 
@@ -445,9 +445,7 @@ function cmd_backup() {
 
     # Silently prune empty directories, since wget creates every directory it traverses.
     # NOTE: We ignore any errors, since pruning the directories isn't important.
-    CURRENT_PWD="${PWD}"
-    cd "${NVIDIA_BACKUP_DIR}" && find . -type d \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -empty -delete
-    cd "${CURRENT_PWD}"
+    find "${NVIDIA_BACKUP_DIR}" -type d \( -path "./koji/*" -or -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -empty -delete
 
     # Update metadata cache with the timestamps for all files.
     # NOTE: Wget in "mirroring" mode above preserves the server's timestamps.
@@ -459,6 +457,35 @@ function cmd_backup() {
     # feature) is worth downloading or not, since they'll be able to easily
     # see when their local archive is newer.
     date "+%s" > "${LAST_UPDATE_FILE}"
+}
+
+
+function cmd_koji() {
+    # SEE: "cmd_backup" which this function is based on.
+
+    KOJI_CMD="${1:-}"
+
+    # Apply existing metadata to ensure that we actually have proper timestamps
+    # when koji-fetch looks for changed files. Git doesn't preserve timestamps.
+    # NOTE: This mostly matters for the custom Git archive feature.
+    if [[ -n "${KOJI_CMD}" ]] && [[ "${KOJI_CMD}" != "list" ]]; then
+        read_metadata
+    fi
+
+    # Run helper to download directly from RPM Fusion's Koji build system.
+    if ! "${SCRIPT_DIR}/lib/koji-fetch" "${KOJI_CMD}"; then
+        # The helper has already explained the error, so just exit.
+        exit 1
+    fi
+
+    # Update metadata cache with the timestamps for all files.
+    # NOTE: koji-fetch above preserves the server's timestamps.
+    if [[ -n "${KOJI_CMD}" ]] && [[ "${KOJI_CMD}" != "list" ]]; then
+        write_metadata
+
+        # Places a UNIX timestamp date-tag in the mirror directory.
+        date "+%s" > "${LAST_UPDATE_FILE}"
+    fi
 }
 
 
@@ -486,7 +513,7 @@ function cmd_build_repo() {
     # DNF to find the latest compatible CUDA package no matter where it is.
     cmd_delete_repo
     HAS_INSTALLED_REPO="false"
-    for REPO_SUB_DIR_ORIG in "releases" "nvidia-driver" "updates" "updates/testing"; do
+    for REPO_SUB_DIR_ORIG in "releases" "nvidia-driver" "updates" "updates/testing" "koji"; do
         # Generate a clean name for the final subdirectory in our own repo.
         # NOTE: We basically replace subdirectory separators with dashes.
         REPO_SUB_DIR_TARGET="$(echo "${REPO_SUB_DIR_ORIG}" | sed 's,/,-,g')"
@@ -636,11 +663,11 @@ function cmd_restore_smart() {
     # Verify the user's arguments.
     # NOTE: Deeper validation will happen when we scan for packages later.
     if [[ $# -ne 3 ]]; then
-        exit_with_error "Missing Arguments.\n\n\nRequired Parameters:\nrestore-smart <repo> <version> <fedorapkg>\n\n<repo>: One of \"releases\", \"nvidia-driver\", \"updates\" or \"updates-testing\", depending on where your desired version resides.\n\n<version>: The exact NVIDIA driver version you want to install. Check the installable versions with the \"list\" command to see the correct version numbers.\n\n<fedorapkg>: The Fedora package version, such as \"fc42\".\n\n\nCommand Example:\nrestore-smart nvidia-driver 575.64.05-2 fc42"
+        exit_with_error "Missing Arguments.\n\n\nRequired Parameters:\nrestore-smart <repo> <version> <fedorapkg>\n\n<repo>: One of \"releases\", \"nvidia-driver\", \"updates\", \"updates-testing\" or \"koji\", depending on where your desired version resides.\n\n<version>: The exact NVIDIA driver version you want to install. Check the installable versions with the \"list\" command to see the correct version numbers.\n\n<fedorapkg>: The Fedora package version, such as \"fc42\".\n\n\nCommand Example:\nrestore-smart nvidia-driver 575.64.05-2 fc42"
     fi
 
-    if [[ ! "${1}" =~ ^(releases|nvidia-driver|updates|updates-testing)$ ]]; then
-        exit_with_error "Error: <repo> must be one of \"releases\", \"nvidia-driver\", \"updates\" or \"updates-testing\"."
+    if [[ ! "${1}" =~ ^(releases|nvidia-driver|updates|updates-testing|koji)$ ]]; then
+        exit_with_error "Error: <repo> must be one of \"releases\", \"nvidia-driver\", \"updates\", \"updates-testing\" or \"koji\"."
     fi
 
     if [[ ! "${2}" =~ ^[0-9] ]]; then
@@ -846,11 +873,11 @@ function cmd_restore_direct() {
     # Verify the user's arguments.
     # NOTE: Deeper validation will happen when we scan for packages later.
     if [[ $# -ne 2 ]]; then
-        exit_with_error "Missing Arguments.\n\n\nRequired Parameters:\nrestore-direct <repo> <version>\n\n<repo>: One of \"releases\", \"nvidia-driver\", \"updates\" or \"updates-testing\", depending on where your desired version resides.\n\n<version>: The exact NVIDIA driver version you want to install. Check the installable versions with the \"list\" command to see the correct version numbers.\n\n\nCommand Example:\nrestore-direct nvidia-driver 575.64.05-2"
+        exit_with_error "Missing Arguments.\n\n\nRequired Parameters:\nrestore-direct <repo> <version>\n\n<repo>: One of \"releases\", \"nvidia-driver\", \"updates\", \"updates-testing\" or \"koji\", depending on where your desired version resides.\n\n<version>: The exact NVIDIA driver version you want to install. Check the installable versions with the \"list\" command to see the correct version numbers.\n\n\nCommand Example:\nrestore-direct nvidia-driver 575.64.05-2"
     fi
 
-    if [[ ! "${1}" =~ ^(releases|nvidia-driver|updates|updates-testing)$ ]]; then
-        exit_with_error "Error: <repo> must be one of \"releases\", \"nvidia-driver\", \"updates\" or \"updates-testing\"."
+    if [[ ! "${1}" =~ ^(releases|nvidia-driver|updates|updates-testing|koji)$ ]]; then
+        exit_with_error "Error: <repo> must be one of \"releases\", \"nvidia-driver\", \"updates\", \"updates-testing\" or \"koji\"."
     fi
 
     if [[ ! "${2}" =~ ^[0-9] ]]; then
@@ -1005,7 +1032,7 @@ function cmd_base_packages() {
 function cmd_show_installed() {
     echo "Showing installed packages matching *nvidia*:"
     dnf --color=always list --installed "*nvidia*" | grep -v '^Installed Packages$'
-    echo -e "\nIMPORTANT: If you see the \"nvidia-gpu-firmware\" package, please don't uninstall it. That's your GPU firmware updates, which are natively provided by Fedora and contain important bugfixes for the hardware itself."
+    echo -e "\nIMPORTANT: If you see the \"nvidia-gpu-firmware\" package, please don't uninstall it. That's your GPU firmware, which is natively provided by Fedora and is required by the hardware itself."
 }
 
 
@@ -1060,14 +1087,14 @@ function cmd_prune_ancient() {
     CURRENT_PWD="${PWD}"
     if [[ "${1}" == "check" ]]; then
         # Check what would be deleted, without actually deleting anything.
-        cd "${NVIDIA_BACKUP_DIR}" && find . -type f \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -mtime +240 -print
+        cd "${NVIDIA_BACKUP_DIR}" && find . -type f \( -path "./koji/*" -or -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -mtime +240 -print
         exit_if_error $? "Error: Failed to scan for old packages. Aborting..."
         echo "This was just a test-run. Nothing has been deleted..."
     else
         # Delete ancient files and empty directories.
         echo "Before:"
         du -hs "${NVIDIA_BACKUP_DIR}"
-        cd "${NVIDIA_BACKUP_DIR}" && find . -type f \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -mtime +240 -print -delete && find . -type d \( -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -empty -print -delete
+        cd "${NVIDIA_BACKUP_DIR}" && find . -type f \( -path "./koji/*" -or -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -mtime +240 -print -delete && find . -type d \( -path "./koji/*" -or -path "./nvidia-driver/*" -or -path "./releases/*" -or -path "./updates/*" \) -empty -print -delete
         exit_if_error $? "Error: Failed to prune old packages. Aborting..."
     fi
     cd "${CURRENT_PWD}"
@@ -1099,7 +1126,8 @@ function cmd_help() {
     echo -e "  - list: Show all installable driver versions and their repo names. Only lists packages for your current Fedora version. The output lines are usable as arguments for the \"restore-smart\" and \"restore-direct\" commands.\n"
     echo -e "  - list-tree: Show all locally mirrored packages.\n"
     echo -e "  - backup [fedora version]: Make incremental local backups of online packages. All of your previous backups are also kept. Automatically detects your current Fedora version if nothing provided. You should also run \"build-repo\" or \"restore\" afterwards, to be able to use the mirrored packages via DNF.\n"
-    echo -e "  - show-date: Displays the completion date of your last \"backup\" command. Useful for determining whether it's worth doing another backup.\n"
+    echo -e "  - koji <version or \"list\">: (Advanced) Downloads pre-release drivers for your current Fedora version directly from RPM Fusion's Koji build system. All of your previous backups are also kept. You should also run \"build-repo\" or \"restore\" afterwards, to be able to use the mirrored packages via DNF.\n"
+    echo -e "  - show-date: Displays the completion date of your last \"backup\" or \"koji\" command. Useful for determining whether it's worth doing another backup.\n"
     echo -e "  - build-repo: Allows you to build the local driver archive repository without installing anything from it. Can be useful if you prefer to do the installation manually via DNF. Most people should use \"restore\" instead, which automates the entire process of building the repo and installing the packages correctly with just one command.\n"
     echo -e "  - show-repo: Show all contents of your local repo. Doesn't display the actual packages, but allows you to see the metadata and directory structures.\n"
     echo -e "  - delete-repo: Deletes the local repository and all references to it from your computer. This doesn't delete your actual mirrored data. It's useful if you don't want to see the local repo anymore after you've installed the desired drivers. There is no harm in removing the repo after installation, since you can simply re-add the repository if you realize that you want some extra, optional NVIDIA packages later.\n"
@@ -1136,6 +1164,9 @@ case "${1}" in
     ;;
     backup)
         cmd_backup "${2}"
+    ;;
+    koji)
+        cmd_koji "${2}"
     ;;
     show-date)
         cmd_show_date

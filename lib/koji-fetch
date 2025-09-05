@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+
+# NVIDIA Driver Archives for Fedora.
+# Author: Arcitec
+# Project Site: https://github.com/Arcitec/NVIDIA_Driver_Archives_for_Fedora
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# This code will only receive updates if necessary (maybe never).
+
+# ----------
+# IMPORTANT:
+# Always use the "nvarchive koji" front-end instead of running "koji-fetch"
+# directly. The "nvarchive" wrapper takes care of updating backup-metadata.
+# ----------
+
+
+import sys
+
+if sys.version_info < (3, 9):
+    print("This application requires Python 3.9 or higher.")
+    sys.exit(1)
+
+import os
+import re
+import shutil
+import subprocess
+from email.utils import parsedate_to_datetime
+from pathlib import Path
+from typing import List
+
+try:
+    import requests
+except ModuleNotFoundError:
+    print('Error: Missing dependencies. Please run "pip install requests".')
+    sys.exit(1)
+
+
+def get_fedora_version() -> int:
+    res = subprocess.run(
+        ["rpm", "-E", "%fedora"], capture_output=True, text=True, check=True
+    )
+
+    version = res.stdout.strip()
+    if version != "":
+        return int(version, 10)
+
+    raise RuntimeError("Unable to detect Fedora version.")
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+NVIDIA_BACKUP_DIR = SCRIPT_DIR.parent / "NVIDIA RPMs"
+
+KOJI_BASE_URL = "https://rpmfusion:rpmfusion@koji.rpmfusion.org/kojifiles/packages"
+
+DRIVER_PACKAGES = [
+    # Based on the "full NVIDIA driver" repository contents at:
+    # https://download1.rpmfusion.org/nonfree/fedora/nvidia-driver/
+    #
+    # All packages: https://koji.rpmfusion.org/koji/search?match=glob&type=package&terms=*nvidia*
+    #   nvidia-kmod: https://koji.rpmfusion.org/koji/packageinfo?packageID=365
+    #   nvidia-open-kmod: https://koji.rpmfusion.org/koji/packageinfo?packageID=646
+    #   nvidia-modprobe: https://koji.rpmfusion.org/koji/packageinfo?packageID=500
+    #   nvidia-persistenced: https://koji.rpmfusion.org/koji/packageinfo?packageID=530
+    #   nvidia-settings: https://koji.rpmfusion.org/koji/packageinfo?packageID=367
+    #   xorg-x11-drv-nvidia: https://koji.rpmfusion.org/koji/packageinfo?packageID=437
+    #
+    # NOTE: This list cannot be dynamically determined, and may differ for older
+    # and newer driver versions. However, the modern NVIDIA driver has settled
+    # into the following master packages, and is not expected to change.
+    "nvidia-kmod",
+    "nvidia-open-kmod",
+    "nvidia-modprobe",
+    "nvidia-persistenced",
+    "nvidia-settings",
+    "nvidia-xconfig",
+    "xorg-x11-drv-nvidia",
+]
+
+FEDORA_VERSION = get_fedora_version()
+
+PKG_PARENT_DIR = NVIDIA_BACKUP_DIR / f"koji/{FEDORA_VERSION}/x86_64"
+
+# Use a requests session to enable keep-alive for faster querying.
+REQ_SESSION = requests.Session()
+
+
+def get_url_text(url: str) -> str:
+    r = REQ_SESSION.get(url)
+    r.raise_for_status()
+    return r.text
+
+
+def download_if_newer(url: str, target: Path) -> None:
+    """
+    Downloads a file from a URL only if it's newer than the local version.
+
+    A download is triggered if:
+    - The local file does not exist.
+    - The local file's size differs from the server's Content-Length.
+    - The server's Last-Modified timestamp is more recent than the local file's.
+
+    The download process is safe: It uses a temporary filename and only renames
+    it upon successful completion. Finally, it sets the local file's modification
+    time to match the server's, for future comparisons.
+
+    Args:
+        url (str): The URL of the file to download.
+        target (Path): The local file path to save the file.
+    """
+
+    # Get headers from the server using a HEAD request.
+    # NOTE: We throw an exception if there's any problem.
+    head_response = requests.head(url, allow_redirects=True, timeout=10)
+    head_response.raise_for_status()
+
+    server_last_modified_str = head_response.headers.get("Last-Modified")
+    server_content_length_str = head_response.headers.get("Content-Length")
+    server_content_encoding_str = head_response.headers.get("Content-Encoding", "")
+
+    # Remote timestamp.
+    server_mtime = -1
+    if server_last_modified_str:
+        try:
+            # Truncate fractional seconds for robust comparison with local file.
+            server_mtime = int(
+                parsedate_to_datetime(server_last_modified_str).timestamp()
+            )
+        except Exception as e:
+            print(
+                f'Invalid Last-Modified timestamp: "{server_last_modified_str}". Reason: {e}.'
+            )
+
+    # Remote file size. Only usable if the content is being sent uncompressed.
+    # SEE: https://en.wikipedia.org/wiki/HTTP_compression#Content-Encoding_tokens
+    is_uncompressed_data = server_content_encoding_str.lower() in ("", "identity")
+    server_size = (
+        int(server_content_length_str)
+        if is_uncompressed_data and server_content_length_str
+        else -1
+    )
+
+    # Check if local file exists and compare its metadata.
+    if target.exists():
+        local_stat = target.stat()
+        local_mtime = int(local_stat.st_mtime)  # Truncate fractions.
+        local_size = local_stat.st_size
+
+        # Compare modification time and file size.
+        # NOTE: If both headers are available, they must both match. Otherwise,
+        # use different logic based on the available information.
+        time_match = server_mtime > -1 and local_mtime >= server_mtime
+        size_match = server_size > -1 and local_size == server_size
+        should_download = True
+        if server_mtime > -1 and server_size > -1:
+            # Both time and filesize must match.
+            should_download = not (time_match and size_match)
+        elif server_mtime > -1:
+            # Time must match.
+            should_download = not time_match
+        elif server_size > -1:
+            # Slightly risky: If time is unknown and a single byte has
+            # changed without any size change, we won't download the file.
+            should_download = not size_match
+        else:
+            print(
+                f'Warning: Server did not specify a size or modification time. Always re-downloading URL: "{url}"...'
+            )
+
+        if not should_download:
+            print(f'  - "{target.name}" is up-to-date.')
+            return
+
+    # Ensure parent directory exists.
+    target.parent.mkdir(0o755, parents=True, exist_ok=True)
+
+    # Define a temporary filename for the download.
+    tmp_target = target.with_suffix(f"{target.suffix}.download_tmp")
+
+    try:
+        # Stream the download to handle large files efficiently.
+        print(f'  - Downloading to temporary file: "{tmp_target.name}"...')
+        with requests.get(url, stream=True, timeout=30) as r:
+            r.raise_for_status()
+            with tmp_target.open("wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+
+        # Rename the temporary file to the final target name.
+        # NOTE: shutil.move() handles cross-filesystem moves, unlike Path.rename().
+        print(f'  - Renaming "{tmp_target.name}" to "{target.name}".')
+        shutil.move(tmp_target, target)
+
+        # Apply the Last-Modified time of the server to the local file.
+        if server_mtime > -1:
+            # Set the last access and modification times.
+            os.utime(target, (server_mtime, server_mtime))
+
+    except requests.exceptions.RequestException as e:
+        print(f'Failed to download "{url}": {e}')
+        raise e
+    except Exception as e:
+        print(f"An error occurred during file handling: {e}")
+        raise e
+    finally:
+        # Ensure temporary file is always removed, even in case of errors.
+        if tmp_target.exists():
+            tmp_target.unlink()
+
+
+def list_available_drivers() -> None:
+    print("Scanning for available NVIDIA driver versions on Koji...\n")
+    idx_html = get_url_text(f"{KOJI_BASE_URL}/xorg-x11-drv-nvidia")
+    for m in re.finditer(r'href="(\d+\.[^"]+)\/"', idx_html):
+        print(f'- "{m.group(1)}"')
+
+    print("\nTo download a Koji driver, run: nvarchive koji <version>")
+
+
+if len(sys.argv) != 2 or sys.argv[1] == "":
+    print(
+        'Error: You must provide an NVIDIA driver version, or run "nvarchive koji list" to see a list of drivers on Koji.'
+    )
+    sys.exit(1)
+
+driver_version = sys.argv[1]
+
+if driver_version == "list":
+    list_available_drivers()
+    sys.exit()
+
+if not re.search(r"^\d+(\.\d+){1,2}$", driver_version):
+    # All NVIDIA drivers follow the "XX.YY[.ZZ]" format:
+    # https://koji.rpmfusion.org/kojifiles/packages/xorg-x11-drv-nvidia/
+    print(f'Error: Invalid driver version format "{driver_version}".')
+    sys.exit(1)
+
+print(f"Fetching NVIDIA driver version {driver_version} from Koji...")
+
+for pkg in DRIVER_PACKAGES:
+    print(f"\nScanning for latest F{FEDORA_VERSION} package revision: {pkg}...")
+    pkg_base_url = f"{KOJI_BASE_URL}/{pkg}/{driver_version}"
+    idx_html = get_url_text(pkg_base_url)
+    latest_rev = -1
+    for m in re.finditer(r'href="(\d+)\.fc(\d+)\/"', idx_html):
+        this_rev = int(m.group(1), 10)
+        this_fedver = int(m.group(2), 10)
+        if this_fedver == FEDORA_VERSION and this_rev > latest_rev:
+            latest_rev = this_rev
+    if latest_rev < 0:
+        raise RuntimeError(
+            f'Unable to find latest F{FEDORA_VERSION} package revision for "{pkg}".'
+        )
+    pkg_rev_tag = f"{latest_rev}.fc{FEDORA_VERSION}"
+    print(f'* Found revision: "{pkg}/{driver_version}/{pkg_rev_tag}".')
+
+    for arch in ["x86_64", "i686"]:
+        # NOTE: The NVIDIA driver is 64-bit, but the "xorg-x11-drv-nvidia"
+        # package (and maybe some others) contain 32-bit runtime libraries.
+        print(f"* Looking for {arch} packages...")
+        pkg_arch_base_url = f"{pkg_base_url}/{pkg_rev_tag}/{arch}"
+        try:
+            idx_html = get_url_text(pkg_arch_base_url)
+        except requests.exceptions.HTTPError as e:
+            # Allow "404 Not Found" for packages that aren't expected to have "i686".
+            if (
+                e.response.status_code == 404
+                and arch == "i686"
+                and pkg != "xorg-x11-drv-nvidia"
+            ):
+                print("  - Unsupported architecture.")
+                continue
+            raise e
+
+        # This package variant and architecture exists. Analyze file list.
+        # NOTE: Index doesn't use pagination, so there's no risk of missing files.
+        rpm_list: List[str] = []
+        for m in re.finditer(r'href="([^"]+?\.rpm)"', idx_html):
+            rpm_name = m.group(1)
+            rpm_list.append(rpm_name)
+            print(f'  - "{rpm_name}"')
+
+        # Mirror all new/modified files.
+        print("* Downloading:")
+        for rpm_name in rpm_list:
+            # Determine where to place the package on-disk.
+            pkg_url = f"{pkg_arch_base_url}/{rpm_name}"
+            is_debug_pkg = re.search(r"-debug(?:info|source)-\d+", rpm_name) is not None
+            rpm_file = (
+                PKG_PARENT_DIR
+                / f"{'debug/' if is_debug_pkg else ''}{rpm_name[0]}/{rpm_name}"
+            )
+
+            download_if_newer(pkg_url, rpm_file)
+
+print(f"\nDownload complete: NVIDIA driver version {driver_version} from Koji...")
+print("To install the driver, run: nvarchive restore")
