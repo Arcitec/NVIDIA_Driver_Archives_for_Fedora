@@ -426,18 +426,22 @@ function cmd_backup() {
     # highly accurate package mirroring, please submit pull requests!
 
     # Fedora Releases: Original driver that shipped at new Fedora release.
-    wget -P "${NVIDIA_BACKUP_DIR}" --mirror -nH -np --cut-dirs=2 --accept "*nvidia*" --regex-type posix --reject-regex '\/(repodata|repoview)\/' "https://download1.rpmfusion.org/nonfree/fedora/releases/${DOWNLOAD_RELEASE}/Everything/x86_64/os/Packages/"
+    wget -P "${NVIDIA_BACKUP_DIR}" --mirror -nH -np --cut-dirs=2 --accept "*nvidia*" --regex-type posix --reject-regex '\/(repodata\/|repoview\/|index\.htm)' "https://download1.rpmfusion.org/nonfree/fedora/releases/${DOWNLOAD_RELEASE}/Everything/x86_64/os/Packages/"
 
     # NVIDIA-Driver: The Fedora "3rd party drivers" repo for those who
     # don't want the full RPM Fusion. Can be delayed compared to Updates.
-    wget -P "${NVIDIA_BACKUP_DIR}" --mirror -nH -np --cut-dirs=2 --accept "*nvidia*" --regex-type posix --reject-regex '\/(repodata|repoview)\/' "https://download1.rpmfusion.org/nonfree/fedora/nvidia-driver/${DOWNLOAD_RELEASE}/x86_64/"
+    wget -P "${NVIDIA_BACKUP_DIR}" --mirror -nH -np --cut-dirs=2 --accept "*nvidia*" --regex-type posix --reject-regex '\/(repodata\/|repoview\/|index\.htm)' "https://download1.rpmfusion.org/nonfree/fedora/nvidia-driver/${DOWNLOAD_RELEASE}/x86_64/"
 
     # Updates: The latest released driver updates in RPM Fusion's repo.
-    wget -P "${NVIDIA_BACKUP_DIR}" --mirror -nH -np --cut-dirs=2 --accept "*nvidia*" --regex-type posix --reject-regex '\/(repodata|repoview)\/' "https://download1.rpmfusion.org/nonfree/fedora/updates/${DOWNLOAD_RELEASE}/x86_64/"
+    wget -P "${NVIDIA_BACKUP_DIR}" --mirror -nH -np --cut-dirs=2 --accept "*nvidia*" --regex-type posix --reject-regex '\/(repodata\/|repoview\/|index\.htm)' "https://download1.rpmfusion.org/nonfree/fedora/updates/${DOWNLOAD_RELEASE}/x86_64/"
 
     # Updates-Testing: The currently testing driver updates in RPM Fusion's repo (if any).
     # NOTE: These versions are sometimes buggy and unstable. That's the point of testing.
-    wget -P "${NVIDIA_BACKUP_DIR}" --mirror -nH -np --cut-dirs=2 --accept "*nvidia*" --regex-type posix --reject-regex '\/(repodata|repoview)\/' "https://download1.rpmfusion.org/nonfree/fedora/updates/testing/${DOWNLOAD_RELEASE}/x86_64/"
+    wget -P "${NVIDIA_BACKUP_DIR}" --mirror -nH -np --cut-dirs=2 --accept "*nvidia*" --regex-type posix --reject-regex '\/(repodata\/|repoview\/|index\.htm)' "https://download1.rpmfusion.org/nonfree/fedora/updates/testing/${DOWNLOAD_RELEASE}/x86_64/"
+
+    # Silently prune the useless "index.htm" directory listings.
+    # NOTE: The "wget" commands above already skips them. This cleans up any previous files.
+    find "${NVIDIA_BACKUP_DIR}" -type f -iname "index.htm*" -delete
 
     # Silently prune empty directories, since wget creates every directory it traverses.
     # NOTE: We ignore any errors, since pruning the directories isn't important.
